@@ -1,0 +1,39 @@
+# Specific files and directories to be ignored in the docker build process
+
+# Git / metadata
+.git
+.gitignore
+
+# Documentation / misc
+README.md
+/doc
+
+# Docker build/run files
+build_motion_control_stack.sh
+
+# Tarballs
+*.tar
+*.tar.gz
+
+# Python cache / temp files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS / editor junk
+.DS_Store
+*.swp
+*.swo
+
+# Data directories
+*/received_data
+*/send_data
+
+# Dev / test data directories
+/shared/myhelpers-jauger/test_data
+/shared/myhelpers-jauger/Mutual_info_tutorial
+
+# Miscellaneous old test files
+/apps/python_fire_server/connection_from_siemens_20250409.py
+/apps/python_fire_server/invertcontrast.py

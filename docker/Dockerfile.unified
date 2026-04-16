@@ -1,0 +1,122 @@
+FROM shared-base-build AS base
+
+ARG THREADS=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV GIT_HTTP_MAX_REQUEST_BUFFER=100M
+
+# STAGE 1: COMPILE ISMRMRD AND SIEMENS LIBS
+# ============================================================
+RUN mkdir -p /opt/code
+
+RUN cd /opt/code && \
+    git clone https://github.com/ismrmrd/ismrmrd.git && \
+    cd ismrmrd && \
+    git checkout v1.13.4 && \
+    mkdir build && cd build && \
+    cmake .. && \
+    make -j${THREADS} && \
+    make install
+
+RUN cd /opt/code && \
+    git clone https://github.com/ismrmrd/siemens_to_ismrmrd.git && \
+    cd siemens_to_ismrmrd && \
+    git checkout v1.2.10 && \
+    mkdir build && cd build && \
+    cmake .. && \
+    make -j${THREADS} && \
+    make install
+
+RUN cd /opt/code && \
+    git clone https://github.com/ismrmrd/ismrmrd-python-tools.git && \
+    cd ismrmrd-python-tools && \
+    pip3 install --no-cache-dir .
+
+
+# STAGE 2: COMPILE C++ DEPENDENCIES (ITK / NLOPT / QUILL)
+# ============================================================
+WORKDIR /usr/src
+
+# ITK library
+RUN mkdir itksrc && cd itksrc && \
+    git clone -b v5.3.0 https://github.com/InsightSoftwareConsortium/ITK ITK && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/opt/itk \
+          -DBUILD_TESTING=OFF \
+          -DBUILD_EXAMPLES=OFF \
+          ../ITK && \
+    make -j${THREADS} && make install
+
+ENV ITK_DIR=/opt/itk/lib/cmake/ITK-5.3
+
+# NLOPT library
+RUN mkdir -p /usr/src/nlopt && cd /usr/src/nlopt && \
+    git clone -b v2.7.0 https://github.com/stevengj/nlopt . && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/opt/nlopt \
+          -DBUILD_SHARED_LIBS=OFF \
+          .. && \
+    make -j${THREADS} && \
+    make install
+
+ENV NLOPT_DIR=/opt/nlopt/lib/cmake/nlopt
+
+# Quill logger library
+RUN cd /usr/src && \
+    git clone https://github.com/odygrd/quill.git && \
+    cd quill && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_INSTALL_PREFIX=/opt/quill .. && \
+    make -j${THREADS} && make install
+
+
+# STAGE 3: COMPILE SMS-MI-REG
+# ============================================================
+RUN mkdir -p /usr/src/moco
+COPY ../external/sms-mi-reg-jauger /usr/src/moco
+
+ENV PATH="/usr/src/moco:${PATH}"
+
+RUN cd /usr/src/moco && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/opt/moco \
+          . && \
+    make -j${THREADS} && \
+    mkdir -p /opt/moco/bin && \
+    cp /usr/src/moco/sms-mi-reg /opt/moco/bin/
+
+ENV MOCO_DIR=/opt/moco/lib/cmake/moco
+
+
+# FINAL RUNTIME IMAGE
+# ============================================================
+FROM shared-base-build AS runtime
+
+# runtime environment
+ENV LD_LIBRARY_PATH=/opt/itk/lib:/opt/nlopt/lib:/opt/moco/lib
+ENV PATH=/opt/moco/bin:${PATH}
+
+# ISMRMRD artifacts
+COPY --from=base /usr/local/include/ismrmrd /usr/local/include/ismrmrd/
+COPY --from=base /usr/local/share/ismrmrd /usr/local/share/ismrmrd/
+COPY --from=base /usr/local/bin /usr/local/bin/
+COPY --from=base /usr/local/lib /usr/local/lib
+
+# C++ installs
+COPY --from=base /opt/itk /opt/itk
+COPY --from=base /opt/nlopt /opt/nlopt
+COPY --from=base /opt/quill /opt/quill
+COPY --from=base /opt/moco /opt/moco
+
+# APPLICATIONS
+COPY ../apps/python_fire_server     /opt/apps/fire_server
+COPY ../apps/motion_monitor         /opt/apps/motion_monitor
+COPY ../apps/queue_processor        /opt/apps/queue_processor
+COPY ../shared                      /opt/shared
+
+# ENTRYPOINT
+COPY ./docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /opt/apps/fire_server
+
+ENTRYPOINT ["/entrypoint.sh"]

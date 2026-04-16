@@ -1,0 +1,226 @@
+#!/bin/bash
+#
+# reterives DICOMs from pacs and converts them to nifti
+# requires dcmtk and dcm2niix be installed
+# optionally requires fzf, parallel, and detox for all features
+# Usage: pacs2nii -m <MRN> -d <date> -o <output_dir>
+
+usage() {
+	echo "Usage :  $0 -m <MRN> -d <date> -o <output_dir>
+    dependencies: dcmtk, dcm2niix, 
+    optional dependencies: fzf, parallel, detox
+
+    Options:
+    -m <MRN> : MRN of the subject
+    -d <date> : date of the scan in YYYYMMDD format, if not provided will ask for selection
+    -o <output_dir> : output directory, default: current directory
+    -r <dcm_dir> : raw dicom directory, default: a directory in the <output_dir> named <MRN>-<date>
+    -n  use dcm2niix without options for the output files, script default is to use Liam's BIDS-like naming
+    -s  sort the dicoms before conversion 
+    -l  leave unconverted (only download dicoms, don't convert to nifti)
+    -h  Display this message
+    -v  Display script version"
+}
+
+output_dir="$(pwd)"
+mrn=""
+date=""
+dcm_dir=""
+modality="MR"
+default_naming=0
+sort=0
+leave_unconverted=0
+while getopts ":r:m:d:o:nslhv" opt; do
+	case $opt in
+	h)
+		usage
+		exit 0
+		;;
+	m)
+		mrn=$OPTARG
+		;;
+	d)
+		date=$OPTARG
+		;;
+	o)
+		output_dir=$OPTARG
+		;;
+	r)
+		dcm_dir=$OPTARG
+		;;
+
+	n)
+		default_naming=1
+		;;
+	s)
+		sort=1
+		;;
+	l)
+		leave_unconverted=1
+		;;
+	*)
+		echo -e "\n  Option does not exist : $OPTARG\n"
+		usage
+		exit 1
+		;;
+	esac # --- end of case ---
+done
+
+# check for basic requirements
+if [ -z "$mrn" ]; then
+	echo "MRN is required, please provide MRN using -m option"
+	usage
+	exit 1
+fi
+
+if [ -z "$date" ]; then
+	echo "No date provided, will ask for date selection later"
+fi
+
+check_bins() {
+	# check binaries are installed
+	if ! command -v findscu &>/dev/null; then
+		echo "findscu is required but not on path/installed, suggestion: sudo apt install dcmtk"
+		exit 1
+	fi
+	if ! command -v dcmdump &>/dev/null; then
+		echo "dcmdump is required but not on path/installed, check dmctk installation"
+		exit 1
+	fi
+	if ! command -v getscu &>/dev/null; then
+		echo "getscu is required but not on path/installed, check dmctk installation"
+		exit 1
+	fi
+	if ! command -v dcm2niix &>/dev/null; then
+		echo "dcm2niix is required but not on path/installed, suggestion: sudo apt install dcm2niix or conda install -c conda-forge dcm2niix"
+		exit 1
+	fi
+}
+
+check_pacs() {
+	pacs_server="pacsstor.tch.harvard.edu"
+	port=104
+	# save responses temporarily
+	response_dir=$(mktemp -d)
+	if [ -z "$date" ]; then
+		findscu -od "${response_dir}" -X -aet RESEARCHPACS -aec PACSDCM -S -k QueryRetrieveLevel=STUDY -k PatientID="$mrn" -k StudyDescription -k Modality=$modality -k StudyInstanceUID -k StudyDate "$pacs_server" "$port"
+	else
+		findscu -od "${response_dir}" -X -aet RESEARCHPACS -aec PACSDCM -S -k QueryRetrieveLevel=STUDY -k PatientID="$mrn" -k StudyDescription -k Modality=$modality -k StudyInstanceUID -k StudyDate="$date" "$pacs_server" "$port"
+	fi
+}
+
+get_tag() { dcmdump +P "$1" "$2" | grep -o -P '(?<=\[)(.*?)(?=\])'; }
+
+sortd() {
+	# Sorts DICOMs by PatientID, Accession Number, and Series
+	# this function is adapted from an earlier script
+	# unsure who was the original author
+	patient=$(get_tag PatientID "$1")
+	study=$(get_tag StudyID "$1")
+	desc=$(get_tag SeriesDescription "$1")
+	seriesnum=$(get_tag SeriesNumber "$1")
+
+	if [[ ! -d "$2" ]]; then
+		echo "missing dicom directory, skipping sort"
+		return 1
+	fi
+
+	if [[ ! "$patient" == "" ]] && [[ ! "$study" == "" ]] && [[ ! "$seriesnum" == "" ]] && [[ ! "$desc" == "" ]]; then
+		dpath="$2"/sub-"$patient"/ses-"$study"/run-"$seriesnum"_"$desc"
+		# remove annoying characters
+		dpath="${dpath//[[:space:]]/_}"
+		dpath="${dpath//[\(\)]/}"
+		dpath="${dpath//[\=\:]/-}"
+		if [[ ! -d "$dpath" ]]; then
+			mkdir -vp "$dpath"
+			mv --backup=t "$1" "$dpath"
+		else
+			mv --backup=t "$1" "$dpath"
+		fi
+	else
+		echo "missing dicom info, skipping"
+	fi
+}
+
+export -f get_tag sortd
+
+select_study() {
+	# select a study from the list
+	if [ -z "$studies" ]; then
+		echo "No studies found for the selected date"
+		exit 1
+	fi
+	if [ "$(echo "$studies" | wc -l)" -eq 1 ]; then
+		selected_study=$studies
+	else
+		echo "$studies"
+		if command -v fzf &>/dev/null; then
+			selected_study=$(echo "$studies" | fzf --ansi --reverse --prompt "Select study" --preview "dcmdump $response_dir/{} +C +P StudyDescription +P StudyDate +P PatientID -s")
+		else
+			echo "fzf not found, (install it for a nice menu)"
+			for study in $studies; do
+				echo "Study: $study"
+				dcmdump "$response_dir/$study" +C +P StudyDescription +P StudyDate +P PatientID
+			done
+			read -p "Enter the study number : " resp_num
+			selected_study=resp$resp_num.dcm
+		fi
+	fi
+	if [ -z "$selected_study" ]; then
+		echo "No study selected, exiting"
+		exit 1
+	fi
+	echo "Selected:"
+	dcmdump "$response_dir/$selected_study" +C
+}
+
+main() {
+	check_bins
+	check_pacs
+	# get the list of studies
+	studies=$(ls "${response_dir}")
+	select_study
+	if [ -z "$date" ]; then
+		date=$(get_tag StudyDate "$response_dir/$selected_study")
+	fi
+	if [ -z "$dcm_dir" ]; then
+		dcm_dir="$output_dir/$mrn-$date"
+	fi
+	mkdir -p "${dcm_dir}"
+	echo "pulling data from PACS..."
+	getscu -od "${dcm_dir}" -aet RESEARCHPACS -aec PACSDCM -S $pacs_server $port "${response_dir}/${selected_study}"
+	if [ "$?" -ne 0 ]; then
+		echo "there was an error pulling from pacs"
+		echo "try running the following command to see the error: getscu -od ${dcm_dir} -aet RESEARCHPACS -aec PACSDCM -S $pacs_server $port ${response_dir}/${selected_study}"
+		exit 1
+	fi
+	cores=$(nproc)
+	if ! [ $sort -eq 0 ]; then
+		echo "sorting dicoms..."
+		# I like to always reserve a core to stay responsive
+		find "${dcm_dir}" -maxdepth 1 -type f -print | parallel -j $((cores - 1)) -k sortd "{} ${dcm_dir}"
+	fi
+	echo "DICOM data pulled to ${dcm_dir}"
+	if [ $leave_unconverted -eq 1 ]; then
+		echo "leaving unconverted, exiting"
+		exit 0
+	fi
+
+	if [ $default_naming -eq 1 ]; then
+		dcm2niix -o "$output_dir" "$dcm_dir" >"$output_dir"/dcm2niix.log
+	else
+		umask 002 # make sure the files are group accessible
+		dcm2niix -z 3 -w 0 -v 1 -f sub-%i/ses-%t/run-%s_desc-%d/sub-%i_ses-%t_run-%s_desc-%d_echo-%e -o "$output_dir" "$dcm_dir" >"$output_dir"/dcm2niix.log
+		if command -v detox &>/dev/null; then
+			# clean up any annoying file names if detox is installed
+			detox -r "$output_dir/sub-$mrn"
+		fi
+	fi
+	# clean up the temp response directory
+	if [ -d "$response_dir" ]; then
+		rm -rf "$response_dir"
+	fi
+	echo "DICOM saved to $dcm_dir, converted to NIfTI files in $output_dir, conversion log: $output_dir/dcm2niix.log, "
+}
+
+main
