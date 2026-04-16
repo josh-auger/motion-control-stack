@@ -32,9 +32,9 @@ from generate_motion_plots import (
 )
 
 
-def setup_logging():
+def setup_logging(log_dir):
     """Configure logging to save logs with a timestamped filename in /working/."""
-    log_filename = os.path.join("/working/", f"log_motion_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_filename = os.path.join(f"{log_dir}/log_motion_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(message)s',
@@ -46,9 +46,9 @@ def setup_logging():
     logging.info(f"Logging will be saved to : {log_filename}")
 
 
-def reset_logging():
+def reset_logging(log_dir):
     """Reset logging configuration to save logs to a new logfile with a fresh timestamp."""
-    log_filename = os.path.join("/working/", f"log_motion_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_filename = os.path.join(f"{log_dir}/log_motion_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     # Remove all existing handlers
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
@@ -192,7 +192,7 @@ def push_img_to_stream(img, width, height, jpeg_quality=80):
         mjpeg_server_module.update_frame(jpeg.tobytes())
 
 
-def monitor_directory(input_dir, head_radius, motion_threshold):
+def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
     """Monitor directory for new image files without deleting any."""
     # Initialization
     # -------------------------------------------
@@ -200,6 +200,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold):
         logging.error(f"Directory '{input_dir}' does not exist.")
         return
 
+    log_dir = input_dir
     VALID_EXTENSIONS = {'.json', '.tfm', '.closeM'}  # JDA: ONLY read incoming files with listed valid extensions!
     logging.info(f"Monitoring directory [{VALID_EXTENSIONS}] : {input_dir} ...")
 
@@ -496,7 +497,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold):
         else:
             # Start timer for new session
             if state["begintime"] is None:
-                reset_logging()
+                reset_logging(log_dir)
                 state["begintime"] = time.time()
                 logging.info(f"Started monitoring at : {datetime.now()}")
 
