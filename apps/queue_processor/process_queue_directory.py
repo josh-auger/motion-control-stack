@@ -26,7 +26,7 @@ import json
 
 
 def setup_logging(log_dir):
-    """Configure logging to save logs with a timestamped filename in /working/."""
+    """Configure logging to save logs with a timestamped filename in mapped data directory."""
     log_filename = os.path.join(f"{log_dir}/log_local_queue_processor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     logging.basicConfig(
         level=logging.INFO,
@@ -72,11 +72,11 @@ def read_nrrd_image(filepath):
         sys.exit(1)     # Exit program with non-zero status code
 
 
-def create_identityTransformFile(reference_volume_filepath, indexcount, volcount, groupcount):
+def create_identityTransformFile(input_dir, reference_volume_filepath, indexcount, volcount, groupcount):
     """Create an identity transform file with center-of-rotation at the spatial center of the reference volume."""
     logging.info(f"Creating identity transform about center of reference volume {volcount:04d}...")
     transform_filename = f"alignTransform_{indexcount:04d}_{volcount:04d}-{groupcount:04d}_identity.tfm"
-    transform_filepath = os.path.join("/working/", transform_filename)
+    transform_filepath = os.path.join(input_dir, transform_filename)
 
     refImage = read_nrrd_image(reference_volume_filepath)
 
@@ -95,13 +95,13 @@ def create_identityTransformFile(reference_volume_filepath, indexcount, volcount
     return transform_filepath
 
 
-def select_input_transform(identityTransform_filepath, counter, reference_volume_flag):
+def select_input_transform(input_dir, identityTransform_filepath, counter, reference_volume_flag):
     """Identify prior alignment transform file (.tfm) as input initialization transform in next registration call."""
     if reference_volume_flag == 0:
         logging.info(f"Still calibrating reference volume. Input transform for registration : {identityTransform_filepath}")
         return identityTransform_filepath
 
-    prior_transform_filepath = f"/working/alignTransform_{counter - 1:04d}_*.tfm"   # ignore volcount or groupcount, just use index counter
+    prior_transform_filepath = f"{input_dir}/alignTransform_{counter - 1:04d}_*.tfm"   # ignore volcount or groupcount, just use index counter
     matches = glob.glob(prior_transform_filepath)
     if matches:
         chosen_transform = max(matches, key=os.path.getmtime)
@@ -432,12 +432,12 @@ def monitor_directory(input_dir, moco_flag):
         state["groupcount"] = int(match.group(2))
         return
 
-    def initialize_reference_volume(target_paths):
+    def initialize_reference_volume(input_dir, target_paths):
         """Set first batch as reference volume."""
         state["reference_volume_filepath"] = target_paths[0]
         logging.info(f"Provisional reference volume set to : {state['reference_volume_filepath']}")
 
-        identity_transform_path = create_identityTransformFile(state["reference_volume_filepath"], state["regcount"], state["volcount"], state["groupcount"])
+        identity_transform_path = create_identityTransformFile(input_dir, state["reference_volume_filepath"], state["regcount"], state["volcount"], state["groupcount"])
 
         slice_timings = read_slice_timings_from_json(state["metadata_filepath"])
         state["slice_timings"] = slice_timings
@@ -452,7 +452,7 @@ def monitor_directory(input_dir, moco_flag):
 
         return identity_transform_path
 
-    def run_registration_batch(target_paths, identity_transform_path):
+    def run_registration_batch(input_dir, target_paths, identity_transform_path):
         """Run MI registration for one batch of image files within a single group pointer file."""
         state["regcount"] += 1
         logging.info(f"Running registration call {state['regcount']}")
@@ -461,63 +461,19 @@ def monitor_directory(input_dir, moco_flag):
         for idx, t in enumerate(target_paths, 1):
             logging.info(f"\t[{idx:02d}] {t}")
 
-        input_transform = select_input_transform(identity_transform_path, state["regcount"], state["reference_volume_flag"])
+        input_transform = select_input_transform(input_dir, identity_transform_path, state["regcount"], state["reference_volume_flag"])
         # input_transform = identity_transform_path
 
         output_string = f"{state['regcount']:04d}_{state['volcount']:04d}-{state['groupcount']:04d}"
         run_MIregistration(state["reference_volume_filepath"], target_paths, input_transform, output_string)
 
-        # track_framewise_displacement(f"/working/alignTransform_{output_string}.tfm", input_transform, 0.6)
-
-    def track_framewise_displacement(current_transform_filepath, prior_transform_filepath, motion_threshold):
-        """Maintain cumulative ledger of calculated framewise displacements between transform pairs."""
-        prior_transform = convert_versor_to_euler(sitk.ReadTransform(prior_transform_filepath))
-        current_transform = convert_versor_to_euler(sitk.ReadTransform(current_transform_filepath))
-        combined_transform = compose_transform_pair(prior_transform, current_transform)
-        prior_params = prior_transform.GetParameters()
-        current_params = current_transform.GetParameters()
-        framewise_displacement = calculate_displacement(combined_transform)
-        motion_flag = 1 if framewise_displacement > motion_threshold else 0
-
-        state["motion_flag_count"] += motion_flag
-        state["cumulative_displacement"] += framewise_displacement
-
-        row = {
-            "reg_index": state["regcount"],
-            "X_rotation(rad)": current_params[0],
-            "Y_rotation(rad)": current_params[1],
-            "Z_rotation(rad)": current_params[2],
-            "X_translation(mm)": current_params[3],
-            "Y_translation(mm)": current_params[4],
-            "Z_translation(mm)": current_params[5],
-            "Displacement(mm)": framewise_displacement,
-            "Cumulative_displacement(mm)": state["cumulative_displacement"],
-            "Volume_index": state["volcount"],
-            "Slice_group_index": state["groupcount"],
-            "Motion_flag": motion_flag
-        }
-        state["motion_table"].append(row)
-
-        def format_params(params, precision=4):
-            return "(" + ", ".join(f"{p:.{precision}g}" for p in params) + ")"
-
-        logging.info(f"=================================")
-        logging.info(f"===== MOTION SUMMARY : {state['regcount']:04d} =====")
-        logging.info(f"\tPrior parameters (Euler) : {format_params(prior_params, 4)}")
-        logging.info(f"\tCurrent parameters (Euler) : {format_params(current_params, 4)}")
-        logging.info(f"\tFramewise displacement (mm) : {framewise_displacement:04f}")
-        logging.info(f"\tCumulative displacement (mm) : {state['cumulative_displacement']:04f}")
-        logging.info(f"\tCumulative motion flags : {state['motion_flag_count']}")
-        logging.info(f"\tCurrent volume count : {state['volcount']} (slice group {state['groupcount']})")
-        logging.info(f"=================================")
-
-    def maybe_update_reference(pointer_filepath):
+    def maybe_update_reference(input_dir, pointer_filepath):
         """Check reference volume transform and update if needed."""
         if state["reference_volume_flag"] == 1:
             return
 
         logging.info("Calibrating reference volume...")
-        tfm = f"/working/alignTransform_{state['regcount']:04d}.tfm"
+        tfm = f"{input_dir}/alignTransform_{state['regcount']:04d}.tfm"
         if not os.path.exists(tfm):
             logging.warning(f"\tTransform file not found: {tfm}")
             logging.warning("\tSkipping reference calibration. Volume 0000 as default reference.")
@@ -603,11 +559,11 @@ def monitor_directory(input_dir, moco_flag):
 
                     # First pointer file --> reference volume
                     if state["reference_volume_filepath"] is None:
-                        identity_transform_path = initialize_reference_volume(target_paths)
+                        identity_transform_path = initialize_reference_volume(input_dir, target_paths)
                     else:
-                        run_registration_batch(target_paths, identity_transform_path)
+                        run_registration_batch(input_dir, target_paths, identity_transform_path)
                         # Check reference volume status
-                        maybe_update_reference(new_filepath)
+                        maybe_update_reference(input_dir, new_filepath)
 
                     # Mark file as processed
                     state["seen_files"].add(fname)
