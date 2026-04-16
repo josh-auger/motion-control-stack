@@ -135,7 +135,7 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
     optimizer = "LN_BOBYQA"
     maxiterations = "1000"
     run_command = [
-                      "/usr/src/moco/sms-mi-reg",
+                      "/opt/moco/bin/sms-mi-reg",
                       reference_volume_filepath,
                       inputTransform_filepath,
                       outputTransformLabel
