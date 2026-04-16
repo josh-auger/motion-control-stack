@@ -259,34 +259,6 @@ def check_reference_volume(transform_filepath, threshold=0.60):
     return 1 if displacement < threshold else 0
 
 
-def make_test_transform(identity_transform_filepath, volcount):
-    """
-    Generate dummy transforms to test moco feedback.
-    Set the range of values for Euler rotation angles and translations, then randomly generate 3 rotations and 3
-    translations for the dummy transform.
-    """
-    identityTransform = sitk.ReadTransform(identity_transform_filepath)
-    transform_center = identityTransform.GetCenter()
-
-    test_transform = sitk.Euler3DTransform()
-    test_transform.SetIdentity()
-    test_transform.SetCenter(transform_center)
-
-    # Generate 3 random rotations + 3 random translations
-    rotation_range = (-0.25,0.25)       # Selection range of Euler rotations (rads)
-    translation_range = (-10.0,10.0)    # Selection range of translations (mm)
-    rotations = np.round(np.random.uniform(rotation_range[0], rotation_range[1], size=3), 4)    # round to 4 decimal places
-    translations = np.round(np.random.uniform(translation_range[0], translation_range[1], size=3), 4)
-    parameters = np.concatenate([rotations, translations])
-
-    logging.info(f"\tRandom Euler3D test parameters for volume {volcount:04d} : {parameters}")
-    test_transform.SetParameters(parameters)
-
-    # Write out transform
-    sitk.WriteTransform(test_transform, f"/working/testTransform_{volcount:04d}.tfm")
-    return
-
-
 def read_slice_timings_from_json(json_filepath):
     """Read series metadata file (.json) and extract the list of slice timings"""
     if not os.path.isfile(json_filepath):
