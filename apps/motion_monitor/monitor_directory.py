@@ -464,11 +464,11 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
     # ESTABLISH SERVER
     # =====================================================================
     # http_url = "http://0.0.0.0:8080/stream.mjpg"
-    PORT = 8080
+    PORT = stream_port
     mjpeg_server_module.start_server(PORT)
     host_ip = get_host_ip()
     logging.info(f"Motion Monitor stream available on host at: http://{host_ip}:{PORT}/stream.mjpg")
-    logging.info(f"\tIF running on crlreconmri server, use crlreconmri host IP address: http://10.27.192.112:8080/stream.mjpg")
+    logging.info(f"\tIF running on crlreconmri server, use crlreconmri host IP address: http://10.27.192.112:{PORT}/stream.mjpg")
 
     # =====================================================================
     # MAIN MONITOR LOOP
@@ -554,12 +554,13 @@ def main():
     default_radius = float(os.environ.get("HEAD_RADIUS", "50"))
     default_threshold = float(os.environ.get("MOTION_THRESH", "0.3"))
 
-    parser.add_argument("--radius", type=float, default=default_radius, help="Head radius (mm) for displacement calculation")
-    parser.add_argument("--threshold", type=float, default=default_threshold, help="Framewise displacement threshold (mm) for motion")
+    parser.add_argument("--head_radius", type=float, default=default_radius, help="Assumed head radius (mm) for displacement calculation")
+    parser.add_argument("--motion_threshold", type=float, default=default_threshold, help="Framewise displacement threshold (mm) for flagging motion")
+    parser.add_argument('-p', '--port', type=int, help='Port')
     args = parser.parse_args()
 
-    monitor_directory(args.input_directory, args.radius, args.threshold)
+    setup_logging(args.input_directory)
+    monitor_directory(args.input_directory, args.port, args.head_radius, args.motion_threshold)
 
 if __name__ == "__main__":
-    setup_logging()
     main()
