@@ -18,13 +18,27 @@ if [ "$MODE" = "fire-server" ]; then
   echo "MOCO_FLAG=$MOCO_FLAG"
   echo "REG_TYPE=$REG_TYPE"
 
-  exec python3 /opt/apps/python_fire_server/main.py \
+  exec python3 /opt/apps/fire_server/main.py \
     -v \
     -H=0.0.0.0 \
     -p=9002 \
     -S /saved_data \
     --moco="$MOCO_FLAG" \
     --regtype="$REG_TYPE"
+
+# ============================================================
+# QUEUE PROCESSOR
+# ============================================================
+elif [ "$MODE" = "queue-processor" ]; then
+
+  MOCO_FLAG="${MOCO_FLAG:-off}"
+
+  echo "Starting queue-processor"
+  echo "MOCO_FLAG=$MOCO_FLAG"
+
+  exec python3 /opt/apps/queue_processor/process_queue_directory.py \
+    /data \
+    --moco "$MOCO_FLAG"
 
 # ============================================================
 # MOTION MONITOR
@@ -39,24 +53,10 @@ elif [ "$MODE" = "motion-monitor" ]; then
   echo "MOTION_THRESH=$MOTION_THRESH"
 
   exec python3 /opt/apps/motion_monitor/monitor_directory.py \
+    -p=8080 \
     /working \
     --head_radius "$HEAD_RADIUS" \
-    --motion_thresh "$MOTION_THRESH"
-
-# ============================================================
-# QUEUE PROCESSOR
-# ============================================================
-elif [ "$MODE" = "queue-processor" ]; then
-
-  MOCO_FLAG="${MOCO_FLAG:-off}"
-
-  echo "Starting queue-processor"
-  echo "MOCO_FLAG=$MOCO_FLAG"
-
-  exec python3 /opt/apps/queue_processor/process_queue_directory.py \
-    /working \
-    /data \
-    --moco "$MOCO_FLAG"
+    --motion_threshold "$MOTION_THRESH"
 
 # ============================================================
 # HELP
