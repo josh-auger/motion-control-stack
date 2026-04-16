@@ -25,9 +25,9 @@ from datetime import datetime
 import json
 
 
-def setup_logging():
+def setup_logging(log_dir):
     """Configure logging to save logs with a timestamped filename in /working/."""
-    log_filename = os.path.join("/working/", f"log_local_queue_processor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_filename = os.path.join(f"{log_dir}/log_local_queue_processor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(message)s',
@@ -39,9 +39,9 @@ def setup_logging():
     logging.info(f"Logging will be saved to : {log_filename}")
 
 
-def reset_logging():
+def reset_logging(log_dir):
     """Reset logging configuration to save logs to a new logfile with a fresh timestamp."""
-    log_filename = os.path.join("/working/", f"log_local_queue_processor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    log_filename = os.path.join(f"{log_dir}/log_local_queue_processor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     # Remove all existing handlers
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
@@ -320,6 +320,7 @@ def monitor_directory(input_dir, moco_flag):
         logging.error(f"Directory '{input_dir}' does not exist.")
         return
 
+    log_dir = input_dir
     moco_enabled = (moco_flag.lower() == "on") if isinstance(moco_flag, str) else False
     logging.info(f"Motion correction {'ENABLED' if moco_enabled else 'DISABLED'}.")
 
@@ -561,7 +562,7 @@ def monitor_directory(input_dir, moco_flag):
         if new_files:
             # Start timer of new session
             if state["begintime"] is None:
-                reset_logging()
+                reset_logging(log_dir)
                 state["begintime"] = time.time()
                 logging.info(f"Started monitoring at : {datetime.now()}")
 
@@ -635,8 +636,8 @@ def main():
     env_moco = os.environ.get("MOCO_FLAG", "off")
     moco_flag = args.moco if args.moco is not None else env_moco
 
+    setup_logging(args.input_directory)
     monitor_directory(args.input_directory, moco_flag)
 
 if __name__ == "__main__":
-    setup_logging()
     main()
