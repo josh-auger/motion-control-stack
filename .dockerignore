@@ -26,14 +26,8 @@ __pycache__/
 *.swp
 *.swo
 
-# Data directories
-*/received_data
-*/send_data
-
-# Dev / test data directories
-/shared/myhelpers-jauger/test_data
-/shared/myhelpers-jauger/Mutual_info_tutorial
-
-# Miscellaneous old test files
+# Data directories / test files (avoid bloated builds from data leakage into images)
+data/
+*.log
 /apps/python_fire_server/connection_from_siemens_20250409.py
 /apps/python_fire_server/invertcontrast.py
