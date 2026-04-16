@@ -1520,7 +1520,13 @@ int main(int argc, char *argv[])
   itk::TransformFileWriter::Pointer trsfWriter;
   trsfWriter = itk::TransformFileWriter::New();
   trsfWriter->SetInput( finalVRTransform );
-  trsfWriter->SetFileName( "alignTransform_" + outputTransformLabel + ".tfm");
+  std::string outFile = "/data/alignTransform_" + outputTransformLabel + ".tfm";
+  trsfWriter->SetFileName(outFile);
+
+//  const char* dataDir = std::getenv("DATA_DIR");
+//  std::string baseDir = (dataDir != nullptr) ? dataDir : "/data";
+//  std::string outFile = baseDir + "/alignTransform_" + outputTransformLabel + ".tfm";
+//  trsfWriter->SetFileName(outFile);
 
   try {
     trsfWriter->Update();
