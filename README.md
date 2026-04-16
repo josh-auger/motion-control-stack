@@ -56,6 +56,7 @@ B3
 B4
 D
 end
+```
 
 ---
 ## 🧱 Core Components
