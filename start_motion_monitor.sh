@@ -15,7 +15,7 @@ DATA_DIR=$(pwd)"/data"
 docker run --rm -it \
   -u $(id -u):$(id -g) \
   -p 8080:8080 \
-  -v $DATA_DIR:/working \
+  -v $DATA_DIR:/data \
   -e HEAD_RADIUS=$HEAD_RADIUS \
   -e MOTION_THRESH=$MOTION_THRESH \
   jauger/motion-control-stack:dev motion-monitor

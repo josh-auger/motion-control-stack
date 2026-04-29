@@ -16,7 +16,7 @@ DATA_DIR=$(pwd)"/data"
 docker run --rm -it \
   -u $(id -u):$(id -g) \
   -p 9002:9002 \
-  -v $DATA_DIR:/saved_data \
+  -v $DATA_DIR:/data \
   -e MOCO_FLAG="$MOCO_FLAG" \
   -e REG_TYPE="$REG_TYPE" \
   jauger/motion-control-stack:dev fire-server
