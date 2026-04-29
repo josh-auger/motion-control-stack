@@ -81,7 +81,7 @@ class handleVolumes:
                     new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into a date-time stamped subdirectory
                     self.generate_close_file("closeQ")  # generate dummy close file to pass to local-queue-processor container
                     self.generate_close_file("closeM")  # generate dummy close file to pass to motion-monitor container
-                    time.sleep(2)
+                    time.sleep(3)
                     self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Another consolidation sweep of final output files
                 except Exception as e:
                     logging.exception("Error consolidating output files into subdirectory.")
@@ -183,7 +183,7 @@ class handleVolumes:
                     new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into subdirectory
                     self.generate_close_file("closeQ")  # generate dummy close file to reset local-queue-processor container
                     self.generate_close_file("closeM")  # generate dummy close file to reset motion-monitor container
-                    time.sleep(2)
+                    time.sleep(3)
                     self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Consolidate outputs from reset processes
                 except Exception as e:
                     logging.exception("Error consolidating output files into subdirectory.")
