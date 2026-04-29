@@ -33,7 +33,7 @@ from generate_motion_plots import (
 
 
 def setup_logging(log_dir):
-    """Configure logging to save logs with a timestamped filename in /working/."""
+    """Configure logging to save logs with a timestamped filename in log directory."""
     log_filename = os.path.join(f"{log_dir}/log_motion_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     logging.basicConfig(
         level=logging.INFO,
@@ -228,6 +228,7 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
             "volume_motion_count": 0,
             "last_plotted_volcount": 0,
             "idle_since": None,
+            "idle_time": 0,
             "final_plot_done": False
         }
     state = reset_variables()
@@ -388,12 +389,12 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
         # logging.info(f"=================================")
         return
 
-    def plot_motion_data():
+    def plot_motion_data(input_dir):
         motion_df = motion_table_to_dataframe(state["motion_table"])
         # timestamp = time.strftime("%Y%m%d_%H%M%S")
-        parameters_filepath = os.path.join("/working/", f"motionMonitor_parameters_{state['protocol_name']}.jpg")
-        displacements_filepath = os.path.join("/working/", f"motionMonitor_framewise_displacement_{state['protocol_name']}.jpg")
-        dashboard_filepath = os.path.join("/working/", f"motionMonitor_dashboard_{state['protocol_name']}.jpg")
+        parameters_filepath = os.path.join(input_dir, f"motionMonitor_parameters_{state['protocol_name']}.jpg")
+        displacements_filepath = os.path.join(input_dir, f"motionMonitor_framewise_displacement_{state['protocol_name']}.jpg")
+        dashboard_filepath = os.path.join(input_dir, f"motionMonitor_dashboard_{state['protocol_name']}.jpg")
         if not motion_df.empty:
             plot_parameters_combined(
                 motion_df,
@@ -416,9 +417,18 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
                 host_ip=host_ip,
                 host_port=PORT)
 
-        img = cv2.imread(dashboard_filepath)
-        push_img_to_stream(img, 1600, 900)
-        return
+            # Safe image load and stream push
+            try:
+                if not os.path.exists(dashboard_filepath):
+                    raise FileNotFoundError(f"File not found: {dashboard_filepath}")
+                img = cv2.imread(dashboard_filepath)
+                if img is None:
+                    raise ValueError(f"cv2.imread returned None (failed to read image): {dashboard_filepath}")
+
+                push_img_to_stream(img, 1600, 900)
+            except Exception as e:  # Gracefully skip streaming step this time
+                logger.error(f"path='{dashboard_filepath}', error='{e}'")
+                return
 
     def export_motion_table_csv(output_dir):
         """Export motion_table to CSV if it exists and is non-empty."""
@@ -449,7 +459,7 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
             logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
 
         # Export motion table BEFORE wiping state
-        plot_motion_data()
+        plot_motion_data(input_dir)
         export_motion_table_csv(output_dir=input_dir)
 
         # Reset all state
@@ -457,6 +467,7 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
         nonlocal_state = reset_variables()
         state.update(nonlocal_state)
         # state["seen_files"] = temp_seen     # DEV: re-assign all seen files to prevent repeat processing, for now
+        time.sleep(3.0)  # Brief sleep before monitoring directory again, allow output files to be organized
         logging.info("\n\n---- Motion-monitor reset ----")
         return
 
@@ -482,14 +493,13 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
 
             if state["idle_since"] is None:
                 state["idle_since"] = time.time()   # start idle timer
-                logging.info("No new files found. Idling...")
                 continue
 
-            idle_time = time.time() - state["idle_since"]
+            state["idle_time"] = time.time() - state["idle_since"]
 
-            if idle_time >= 5 and not state["final_plot_done"]:
-                logging.info(f"Idle for {idle_time:.3f} secs. Generating final motion plots.")
-                plot_motion_data()
+            if state["idle_time"] >= 5 and not state["final_plot_done"]:
+                logging.info(f"Idle for {state['idle_time']:.3f} secs. Generating final motion plots.")
+                plot_motion_data(input_dir)
                 export_motion_table_csv(output_dir=input_dir)
                 state["final_plot_done"] = True     # only run final plotting once after idling
                 logging.info(f"Idling...")
@@ -500,6 +510,11 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
                 reset_logging(log_dir)
                 state["begintime"] = time.time()
                 logging.info(f"Started monitoring at : {datetime.now()}")
+
+            # Reset idle tracking
+            if state["idle_since"] is not None:
+                state["idle_since"] = None
+                state["final_plot_done"] = False
 
             # Process each new file
             logging.info(f"Found {len(new_files)} new file(s) to process")
@@ -536,7 +551,7 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
 
                     track_framewise_displacement(new_filepath, state["prior_transform"], head_radius, motion_threshold)
                     if (state["volcount"] // 5) > (state["last_plotted_volcount"] // 5):
-                        plot_motion_data()
+                        plot_motion_data(input_dir)
                         state["last_plotted_volcount"] = state["volcount"]
 
                     state["seen_files"].add(fname)
