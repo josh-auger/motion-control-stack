@@ -48,50 +48,51 @@ end
 ## 🧱 Core Components
 
 ### 🔥 Fire Server
-- Listens for incoming MRD image data streams (port `9002`)
+- Listens for incoming MRD image data stream (port `9002`)
 - Compiles streamed image data into:
+  - Series metadata (`.json`)
   - NRRD format detached image header (`.nhdr`)
   - Raw byte string of image data (`.raw`)
   - Pointer file denoting acquisition groups (`.txt`)
 
 #### When MOCO is enabled:
 - Monitors data directory for new transform files (`.tfm`)
-- Converts alignment transforms into scanner coordinate frame
-- Sends MoCo feedback message back to scanner to update imaging field-of-view
+- Converts alignment transforms into scanner's global coordinate frame
+- Sends MoCo feedback message to scanner to update imaging field-of-view
 
 ---
 ### 🔁 Queue Processor
-- Monitors data directory for new pointer files (`.txt`)
-- Loads referenced image data (`.nhdr` + `.raw`)
+- Monitors data directory for new pointer files (`.txt`) from fire-server
+- Loads image data (`.nhdr` + `.raw`) referenced in the pointer file
 - Executes image registration using `sms-mi-reg`
-- Outputs alignment transforms (`.tfm`)
+- Outputs alignment transforms (`.tfm`) that map the reference volume to the new target slice(s)
 
 #### Queue Behavior Modes
-**MOCO OFF**
-- First-In-First-Out (FIFO)
-- Processes all incoming data sequentially as received
+**FIFO ON**
+- First-in-first-out (FIFO)
+- Processes all incoming data sequentially as acquired
 
-**MOCO ON**
-- Drops stale pointer files to process only the most recent image data
-- Minimizes latency for real-time correction
+**FIFO OFF**
+- Last-in-first-out
+- Drops stale pointer files to process only the most recent image data received
+- Minimizes latency for real-time correction to the latest known position
 
 ---
 ### 📈 Motion Monitor
-- Monitors data directory for new transform files (`.tfm`)
+- Monitors data directory for new alignment transform files (`.tfm`) from queue-processor registration
 - Maintains a running ledger of alignment transforms
 - Computes **framewise displacement** between sequential transforms
 - Classifies motion events based on set motion threshold
-- Generates a live-updating motion summary figure
-- Streams results to a web interface
+- Generates a motion summary figure and livestreams to a web interface (`http://<host IP address>:8080/stream.mjpg`)
 
 ---
 ### ⚡ MOCO (Motion Correction) Feedback
-When motion correction is enabled:
-1. Queue Processor prioritizes the most recent image data  
+When prospective motion correction is enabled:
+1. Queue Processor prioritizes the most recent image data (FIFO off)
 2. Registration computes current subject position  
 3. Fire Server converts transform into scanner coordinates  
-4. A MOCO feedback packet is sent to the scanner  
-5. The scanner updates the imaging field-of-view  
+4. A MOCO feedback packet is sent to the scanner (MOCO on)
+5. The scanner updates the imaging field-of-view
 
 This creates a **closed-loop control system** that reduces motion artifacts during acquisition.
 
@@ -111,13 +112,14 @@ Future developments will focus on handling all data in working memory.
 - Potential for race conditions (e.g., partial file writes)
 
 ### Queue Strategy Tradeoffs
-- **FIFO** → first-in-first-out complete processing  
-- **Latest-only** → most-recent-position responsive processing
+- **FIFO** → first-in-first-out for completeness 
+- **Latest-only** → last-in-first-out for lowest latency
 
 ---
 ## ⚙️ Configuration
 Runtime behavior is controlled via environment variables:
 - `MOCO_FLAG`
 - `REG_TYPE`
+- `FIFO_FLAG`
 - `HEAD_RADIUS`
 - `MOTION_THRESH`
