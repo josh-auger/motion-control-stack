@@ -8,8 +8,8 @@
 README.md
 /doc
 
-# Docker build/run files
-build_motion_control_stack.sh
+# Bash scripts for Docker build/run
+*.sh
 
 # Tarballs
 *.tar
