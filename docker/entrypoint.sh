@@ -24,14 +24,14 @@ if [ "$MODE" = "all" ]; then
     -v -H=0.0.0.0 -p=9002 -S /data \
     --moco="$MOCO_FLAG" \
     --regtype="$REG_TYPE" \
-    > /dev/null 2>&1 &    # suppress logs in terminal
+    > /dev/null 2>&1 &    # suppress stdout and stderr logs in terminal
   FIRE_PID=$!
 
   echo "FIFO_FLAG=$FIFO_FLAG"
   python3 /opt/apps/queue_processor/process_queue_directory.py \
     /data \
     --fifo "$FIFO_FLAG" \
-    > /dev/null 2>&1 &    # suppress logs in terminal
+    > /dev/null 2>&1 &    # suppress stdout and stderr log in terminal
   QUEUE_PID=$!
 
   echo "HEAD_RADIUS=$HEAD_RADIUS"
@@ -50,7 +50,7 @@ if [ "$MODE" = "all" ]; then
 
   # ---- Signal handling ----
   shutdown() {
-    echo "Shutting down services..."
+    echo " Shutting down services..."
     kill -TERM $FIRE_PID $QUEUE_PID $MONITOR_PID 2>/dev/null || true
     wait
     exit 0
