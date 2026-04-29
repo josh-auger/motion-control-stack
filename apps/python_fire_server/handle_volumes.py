@@ -412,7 +412,7 @@ class handleVolumes:
         self.frameNumberLookup.append(entry)
 
         # Write moco feedback entry to cumulative log file
-        feedback_log_path = os.path.join(self.datafolder, "moco_feedback_log.log")
+        feedback_log_path = os.path.join(self.datafolder, "log_moco_feedback_sent.log")
         with open(feedback_log_path, 'a') as f:
             f.write(format_moco_struct(moco_struct) + '\n')
             f.write(f"from transform: {versor_transform_filename}\n\n")

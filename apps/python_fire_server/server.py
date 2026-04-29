@@ -38,7 +38,7 @@ class Server:
         if not os.path.exists(self.savedataFolder):
             os.makedirs(self.savedataFolder)
 
-        self.log_filename = os.path.join(self.savedataFolder,f"python-fire-server-jauger_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        self.log_filename = os.path.join(self.savedataFolder,f"log_python-fire-server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
         # Remove old file handler if present
         if self.log_handler:
