@@ -1,0 +1,46 @@
+
+services:
+  fire-server:
+    image: jauger/motion-control-stack:dev
+    command: fire-server
+    user: "${HOST_UID}:${HOST_GID}"
+    ports:
+      - "9002:9002"
+    volumes:
+      - ${DATA_DIR}:/data
+    environment:
+      MOCO_FLAG: "off"          # fire-server MOCO off = no moco feedback sent back to scanner
+      REG_TYPE: "smsgroup"      # smsgroup = slice-group-to-volume registration
+    stdin_open: true
+    init: true
+    stop_grace_period: 10s
+#    restart: unless-stopped
+
+  queue-processor:
+    image: jauger/motion-control-stack:dev
+    command: queue-processor
+    user: "${HOST_UID}:${HOST_GID}"
+    volumes:
+      - ${DATA_DIR}:/data
+    environment:
+      FIFO_FLAG: "on"   # queue-processor FIFO on = 'first-in-first-out' handling of image registrations
+    stdin_open: true
+    init: true
+    stop_grace_period: 10s
+#    restart: unless-stopped
+
+  motion-monitor:
+    image: jauger/motion-control-stack:dev
+    command: motion-monitor
+    user: "${HOST_UID}:${HOST_GID}"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${DATA_DIR}:/data
+    environment:
+      HEAD_RADIUS: "50"
+      MOTION_THRESH: "0.3"
+    stdin_open: true
+    init: true
+    stop_grace_period: 10s
+#    restart: unless-stopped
