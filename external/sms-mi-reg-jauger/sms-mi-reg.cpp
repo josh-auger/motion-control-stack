@@ -1399,17 +1399,17 @@ int main(int argc, char *argv[])
   const ImageType::SpacingType & sp = inputRefVolImage->GetSpacing();
   const ImageType::RegionType region = inputRefVolImage->GetLargestPossibleRegion();
   // Set initial step sizes for translation parameters:
-  initial_step_sizes[3] = sp[0]/10.0;
-  initial_step_sizes[4] = sp[1]/10.0;
-  initial_step_sizes[5] = sp[2]/10.0;
+  initial_step_sizes[3] = sp[0] * 0.5;
+  initial_step_sizes[4] = sp[1] * 0.5;
+  initial_step_sizes[5] = sp[2] * 0.5;
   // Set initial step sizes for rotation parameters:
   // Heuristic - set the step size in radians to the number of radians
   // that is approximately a tenth of a voxel step at the edge of the image.
   // Estimate the diameter by a fraction of the distance across the field of view.
   // step size theta = arc length / radius.
-  initial_step_sizes[0] = 0.1 * sp[0]/(region.GetSize()[0]*sp[0]*0.5);
-  initial_step_sizes[1] = 0.1 * sp[1]/(region.GetSize()[1]*sp[1]*0.5);
-  initial_step_sizes[2] = 0.1 * sp[2]/(region.GetSize()[2]*sp[2]*0.5);
+  initial_step_sizes[0] = 0.5 * sp[0]/(region.GetSize()[0]*sp[0]*0.5);
+  initial_step_sizes[1] = 0.5 * sp[1]/(region.GetSize()[1]*sp[1]*0.5);
+  initial_step_sizes[2] = 0.5 * sp[2]/(region.GetSize()[2]*sp[2]*0.5);
 
   // Set the optimizer initial step sizes
   opt.set_initial_step( initial_step_sizes );
@@ -1428,12 +1428,12 @@ int main(int argc, char *argv[])
 
   // JDA: Set the absolute parameter step tolerances
   std::vector<double> xtol_abs_values(6);
-  xtol_abs_values[0] = 1.7e-3; // 0.1 deg in rads
-  xtol_abs_values[1] = 1.7e-3;
-  xtol_abs_values[2] = 1.7e-3;
-  xtol_abs_values[3] = 1e-1; // 0.1 mm
-  xtol_abs_values[4] = 1e-1;
-  xtol_abs_values[5] = 1e-1;
+  xtol_abs_values[0] = 1.7e-4; // 0.01 deg in rads
+  xtol_abs_values[1] = 1.7e-4;
+  xtol_abs_values[2] = 1.7e-4;
+  xtol_abs_values[3] = 1e-2; // 0.01 mm
+  xtol_abs_values[4] = 1e-2;
+  xtol_abs_values[5] = 1e-2;
   opt.set_xtol_abs(xtol_abs_values);
   std::cout << "Absolute tolerance on parameters : " << std::endl;
   std::cout << " xtol_abs_values[0] : " << xtol_abs_values[0] << std::endl;
