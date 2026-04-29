@@ -49,19 +49,19 @@ end
 
 ### 🔥 Fire Server
 - Listens for incoming MRD image data streams (port `9002`)
-- Converts streamed data into:
-  - NRRD header files (`.nhdr`)
-  - Raw image data (`.raw`)
-  - Pointer files (`.txt`)
+- Compiles streamed image data into:
+  - NRRD format detached image header (`.nhdr`)
+  - Raw byte string of image data (`.raw`)
+  - Pointer file denoting acquisition groups (`.txt`)
 
 #### When MOCO is enabled:
-- Monitors for new transform files (`.tfm`)
-- Converts transforms into scanner coordinate frame
-- Sends real-time feedback packets to the scanner
+- Monitors data directory for new transform files (`.tfm`)
+- Converts alignment transforms into scanner coordinate frame
+- Sends MoCo feedback message back to scanner to update imaging field-of-view
 
 ---
 ### 🔁 Queue Processor
-- Monitors the data directory for new pointer files (`.txt`)
+- Monitors data directory for new pointer files (`.txt`)
 - Loads referenced image data (`.nhdr` + `.raw`)
 - Executes image registration using `sms-mi-reg`
 - Outputs alignment transforms (`.tfm`)
@@ -69,26 +69,24 @@ end
 #### Queue Behavior Modes
 **MOCO OFF**
 - First-In-First-Out (FIFO)
-- Processes all incoming data
+- Processes all incoming data sequentially as received
 
 **MOCO ON**
-- Latest-only processing
-- Drops stale pointer files
+- Drops stale pointer files to process only the most recent image data
 - Minimizes latency for real-time correction
 
 ---
 ### 📈 Motion Monitor
-- Monitors transform files (`.tfm`)
-- Maintains a running sequence of transforms
-- Computes **framewise displacement**
-- Classifies motion events based on thresholds
+- Monitors data directory for new transform files (`.tfm`)
+- Maintains a running ledger of alignment transforms
+- Computes **framewise displacement** between sequential transforms
+- Classifies motion events based on set motion threshold
 - Generates a live-updating motion summary figure
 - Streams results to a web interface
 
 ---
 ### ⚡ MOCO (Motion Correction) Feedback
 When motion correction is enabled:
-
 1. Queue Processor prioritizes the most recent image data  
 2. Registration computes current subject position  
 3. Fire Server converts transform into scanner coordinates  
@@ -100,24 +98,21 @@ This creates a **closed-loop control system** that reduces motion artifacts duri
 ---
 ## 📂 Data Flow
 All components communicate through a shared filesystem (typically mounted as `/data`).
+Future developments will focus on handling all data in working memory.
 
 ---
 ## ⚠️ Design Considerations
 
 ### Real-Time Constraints
-- MOCO mode prioritizes **low latency** over completeness
+- MOCO mode must prioritize **low latency** over completeness
 
-### File-Based Communication
+### Shared Volume File-Based Communication
+- Acts as both data store and inter-process communication layer
 - Potential for race conditions (e.g., partial file writes)
 
 ### Queue Strategy Tradeoffs
 - **FIFO** → first-in-first-out complete processing  
-- **Latest-only** → most-recent-position responsive processing  
-
-### Shared Volume
-- Acts as both:
-  - Data store
-  - Inter-process communication layer
+- **Latest-only** → most-recent-position responsive processing
 
 ---
 ## ⚙️ Configuration
