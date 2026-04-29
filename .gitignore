@@ -1,0 +1,20 @@
+# Specific files and directories to be ignored in the github commit process
+
+# Tarballs of docker images
+*.tar
+*.tar.gz
+
+# Python cache / temp files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS / editor junk
+.DS_Store
+*.swp
+*.swo
+
+# Data directories / test files
+data/
+*.log
