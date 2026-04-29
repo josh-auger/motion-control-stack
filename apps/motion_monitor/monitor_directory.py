@@ -341,8 +341,16 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
 
     def track_framewise_displacement(current_transform_filepath, prior_transform_filepath, head_radius, motion_threshold):
         """Maintain cumulative ledger of calculated framewise displacements between transform pairs."""
+        if not os.path.exists(prior_transform_filepath):
+            logging.warning(f"Prior transform file no longer exists : {prior_transform_filepath}")
+            return
         prior_transform = convert_versor_to_euler(sitk.ReadTransform(prior_transform_filepath))
+
+        if not os.path.exists(current_transform_filepath):
+            logging.warning(f"Current transform file no longer exists : {current_transform_filepath}")
+            return
         current_transform = convert_versor_to_euler(sitk.ReadTransform(current_transform_filepath))
+
         combined_transform = compose_transform_pair(prior_transform, current_transform)
         prior_params = prior_transform.GetParameters()
         current_params = current_transform.GetParameters()
@@ -379,34 +387,26 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
         logging.info(f"Prior Euler parameters ({state['itemcount'] - 1:04d}) : {format_params(prior_params, 4)}")
         logging.info(f"Current Euler parameters ({state['itemcount']:04d}) : {format_params(current_params, 4)}")
         logging.info(f"Framewise displacement (mm) : {framewise_displacement:04f}")
-        # logging.info(f"=================================")
-        # logging.info(f"===== MOTION SUMMARY : {state['itemcount']:04d} =====")
-        # logging.info(f"\tCumulative displacement (mm) : {state['cumulative_displacement']:04f}")
-        # logging.info(f"\tCumulative motion flags : {state['motion_flag_count']}")
-        # logging.info(f"\tCurrent volume count : {state['volcount']} (slice group {state['groupcount']})")
-        # logging.info(f"\tMotion-free volumes : {(state['volcount'] - state['volume_motion_count'])}")
-        # logging.info(f"\tVolumes with motion : {state['volume_motion_count']}")
-        # logging.info(f"=================================")
         return
 
     def plot_motion_data(input_dir):
         motion_df = motion_table_to_dataframe(state["motion_table"])
         # timestamp = time.strftime("%Y%m%d_%H%M%S")
-        parameters_filepath = os.path.join(input_dir, f"motionMonitor_parameters_{state['protocol_name']}.jpg")
-        displacements_filepath = os.path.join(input_dir, f"motionMonitor_framewise_displacement_{state['protocol_name']}.jpg")
+        # parameters_filepath = os.path.join(input_dir, f"motionMonitor_parameters_{state['protocol_name']}.jpg")
+        # displacements_filepath = os.path.join(input_dir, f"motionMonitor_framewise_displacement_{state['protocol_name']}.jpg")
         dashboard_filepath = os.path.join(input_dir, f"motionMonitor_dashboard_{state['protocol_name']}.jpg")
         if not motion_df.empty:
-            plot_parameters_combined(
-                motion_df,
-                output_filename=parameters_filepath,
-                protocol_name=state['protocol_name'])
-            plot_displacements(
-                motion_df,
-                output_filename=displacements_filepath,
-                protocol_name=state['protocol_name'],
-                threshold=motion_threshold,
-                num_expected_volumes=state['total_repetitions'],
-                num_moved_volumes=state['volume_motion_count'])
+            # plot_parameters_combined(
+            #     motion_df,
+            #     output_filename=parameters_filepath,
+            #     protocol_name=state['protocol_name'])
+            # plot_displacements(
+            #     motion_df,
+            #     output_filename=displacements_filepath,
+            #     protocol_name=state['protocol_name'],
+            #     threshold=motion_threshold,
+            #     num_expected_volumes=state['total_repetitions'],
+            #     num_moved_volumes=state['volume_motion_count'])
             plot_motion_dashboard(
                 motion_df,
                 output_filename=dashboard_filepath,
@@ -427,7 +427,7 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
 
                 push_img_to_stream(img, 1600, 900)
             except Exception as e:  # Gracefully skip streaming step this time
-                logger.error(f"path='{dashboard_filepath}', error='{e}'")
+                logging.error(f"path='{dashboard_filepath}', error='{e}'")
                 return
 
     def export_motion_table_csv(output_dir):
@@ -550,7 +550,8 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
                         state["prior_transform"] = new_filepath
 
                     track_framewise_displacement(new_filepath, state["prior_transform"], head_radius, motion_threshold)
-                    if (state["volcount"] // 5) > (state["last_plotted_volcount"] // 5):
+                    # if (state["volcount"] // 5) > (state["last_plotted_volcount"] // 5):    # update dashboard every N volumes
+                    if state["itemcount"] % 25 == 0:
                         plot_motion_data(input_dir)
                         state["last_plotted_volcount"] = state["volcount"]
 
