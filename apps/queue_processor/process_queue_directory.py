@@ -284,7 +284,7 @@ def read_slice_timings_from_json(json_filepath):
     return slice_timing
 
 
-def monitor_directory(input_dir, moco_flag):
+def monitor_directory(input_dir, fifo_flag):
     """Monitor directory for new image files without deleting any."""
     # Initialization
     # -------------------------------------------
@@ -293,8 +293,8 @@ def monitor_directory(input_dir, moco_flag):
         return
 
     log_dir = input_dir
-    moco_enabled = (moco_flag.lower() == "on") if isinstance(moco_flag, str) else False
-    logging.info(f"Motion correction {'ENABLED' if moco_enabled else 'DISABLED'}.")
+    fifo_disabled = (fifo_flag.lower() == "off") if isinstance(fifo_flag, str) else False
+    logging.info(f"First-in-first-out processing {'DISABLED. Running last-in-first-out.' if fifo_disabled else 'ENABLED.'}")
 
     VALID_EXTENSIONS = {'.json', '.txt', '.closeQ'}  # JDA: Read incoming metadata (.json) and group pointer files (.txt) only!
     logging.info(f"Monitoring directory [{VALID_EXTENSIONS}] : {input_dir} ...")
@@ -349,8 +349,8 @@ def monitor_directory(input_dir, moco_flag):
         # Return only new files not yet processed
         return [f for (f, _) in valid_files]
 
-    def pick_files_moco(new_files):
-        """Moco: keep newest file only, discard older ones."""
+    def pick_newest_files(new_files):
+        """FIFO OFF: keep newest file only, discard older ones."""
         newest = max(
             new_files,
             key=lambda f: os.path.getmtime(os.path.join(input_dir, f))
@@ -496,10 +496,10 @@ def monitor_directory(input_dir, moco_flag):
 
             logging.info(f"Found {len(new_files)} new file(s) to process")
 
-            # Determine if moco is "on" and need to "pick newest only" logic
-            apply_moco_filter = moco_enabled and state["metadata_filepath"] is not None and state["reference_volume_filepath"] is not None
-            if apply_moco_filter:
-                new_files = pick_files_moco(new_files)  # Keep only newest file
+            # Determine if fifo processing is "off" and need to "pick newest only" logic
+            apply_fifo_filter = fifo_disabled and state["metadata_filepath"] is not None and state["reference_volume_filepath"] is not None
+            if apply_fifo_filter:
+                new_files = pick_newest_files(new_files)  # Keep only newest file
 
             # Process each new file
             for fname in new_files:
@@ -558,14 +558,14 @@ def monitor_directory(input_dir, moco_flag):
 def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("input_directory", nargs="?", help="Path to image files")
-    parser.add_argument("--moco", type=str, choices=["on", "off"])
+    parser.add_argument("--fifo", type=str, choices=["on", "off"], help="First-in-first-out processing")
     args = parser.parse_args()
 
-    env_moco = os.environ.get("MOCO_FLAG", "off")
-    moco_flag = args.moco if args.moco is not None else env_moco
+    env_fifo = os.environ.get("FIFO_FLAG", "on")
+    fifo_flag = args.fifo if args.fifo is not None else env_fifo
 
     setup_logging(args.input_directory)
-    monitor_directory(args.input_directory, moco_flag)
+    monitor_directory(args.input_directory, fifo_flag)
 
 if __name__ == "__main__":
     main()
