@@ -1,0 +1,1 @@
+docker build --no-cache -t shared-base-build:latest -f ./docker/Dockerfile.base .
