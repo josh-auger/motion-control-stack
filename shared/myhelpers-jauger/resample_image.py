@@ -12,7 +12,8 @@ import argparse
 import SimpleITK as sitk
 
 
-def downsample_image(itk_image, factor=2):
+def resample_image(itk_image, factor=2):
+
     """
     Downsample an image by a specified factor in all axes.
     """
@@ -47,7 +48,7 @@ def main():
     input_image = sitk.ReadImage(args.inputimage)
 
     # Apply downsampling
-    downsampled_image = downsample_image(input_image, factor=args.factor)
+    resampled_image = resample_image(input_image, factor=args.factor)
 
     # Determine output filename
     if args.outputimage:
@@ -58,7 +59,7 @@ def main():
         name_without_ext = os.path.splitext(base_name)[0]
         output_filename = os.path.join(input_dir, f"{name_without_ext}_downsampled.nii")
 
-    sitk.WriteImage(downsampled_image, output_filename)
+    sitk.WriteImage(resampled_image, output_filename)
 
     print(f"Downsampled image saved as: {output_filename}")
 
