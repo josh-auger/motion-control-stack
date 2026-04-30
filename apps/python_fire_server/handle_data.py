@@ -31,7 +31,7 @@ from convert_transform_for_moco import *
 import json
 from math import floor
 
-class handleVolumes:
+class handleData:
     # Initiate an iterator to read each item in the connection
     def __init__(self, connection, datafolder, moco_enabled=False, registration_type=None):
         self.connection = connection
@@ -50,7 +50,7 @@ class handleVolumes:
         self.registration_type = registration_type
 
         # Log moco state
-        logging.info(f"handleVolumes initialized (moco={'ON' if self.moco_enabled else 'OFF'})")
+        logging.info(f"handleData initialized (moco={'ON' if self.moco_enabled else 'OFF'})")
 
         try:
             now = datetime.now()

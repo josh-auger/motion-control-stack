@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 
 from connection import Connection
-from handle_volumes import handleVolumes
+from handle_data import handleData
 from saveData import SaveData
 
 class Server:
@@ -68,7 +68,7 @@ class Server:
     def handle(self, sock):
         try:
             connection = Connection(sock)
-            outdata = handleVolumes(connection, self.savedataFolder, self.moco_enabled, self.registration_type)    # Run analysis code "handle_volumes.py"
+            outdata = handleData(connection, self.savedataFolder, self.moco_enabled, self.registration_type)    # Run analysis code "handle_volumes.py"
             for item in outdata:
                 hfile = item
         except Exception as e:
