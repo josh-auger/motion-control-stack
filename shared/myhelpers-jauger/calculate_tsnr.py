@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 from scipy.io import savemat
 import argparse
 from run_synthstrip_docker import run_synthstrip
-from display_tsnr_results import display_tsnr_results
+from display_tsnr_results import display_tsnr_components, display_tsnr_slices
 
 def usage():
     print("Usage: python3 calculate_tsnr.py [option flags] <input_directory>")
@@ -267,12 +267,13 @@ def main():
             summarize_tsnr(tsnr_map_stripped, "(Masked) TSNR Summary")
 
         if args.plot:
-            display_tsnr_results(reference_img, mean_data_stripped, std_data_stripped, tsnr_map_stripped, tsnr_path)
+            display_tsnr_components(reference_img, mean_data_stripped, std_data_stripped, tsnr_map_stripped, tsnr_path)
     else:
         if args.verbose:
             summarize_tsnr(tsnr_map, "TSNR Summary")
         if args.plot:
-            display_tsnr_results(reference_img, mean_data, std_data, tsnr_map, tsnr_path)
+            display_tsnr_components(reference_img, mean_data, std_data, tsnr_map, tsnr_path)
+            display_tsnr_slices(tsnr_map, tsnr_path)
 
 
 if __name__ == "__main__":
