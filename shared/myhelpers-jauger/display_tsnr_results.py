@@ -28,7 +28,7 @@ def preprocess_for_display(volume):
     return volume
 
 
-def display_tsnr_results(reference_img, mean_signal, std_signal, tsnr_map, save_dir):
+def display_tsnr_components(reference_img, mean_signal, std_signal, tsnr_map, save_dir):
     """Display mid-slice comparison for input volume, mean signal, std-dev, and tSNR with colorbars."""
     # Load reference image volume
     volume = sitk.GetArrayFromImage(reference_img)
@@ -82,6 +82,66 @@ def display_tsnr_results(reference_img, mean_signal, std_signal, tsnr_map, save_
     print(f"Figure saved: {plot_filename}")
 
 
+def display_tsnr_slices(tsnr_map, save_dir, slice_indices=None, vmax=None):
+    """
+    Display 4 axial slices from the tSNR volume with a consistent color scale.
+
+    Parameters:
+        tsnr_map (np.ndarray): 3D tSNR volume (z, y, x)
+        save_dir (str): Directory to save the figure
+        slice_indices (list or None): List of 4 slice indices. If None, auto-select.
+        vmax (float): Upper bound for color scale (default=100)
+    """
+    # Preprocess orientation
+    tsnr_map = preprocess_for_display(tsnr_map)
+    nz = tsnr_map.shape[0]
+    center_x = tsnr_map.shape[2] // 2
+    center_y = tsnr_map.shape[1] // 2
+
+    # Auto-select 4 evenly spaced slices if not provided
+    if slice_indices is None:
+        slice_indices = [
+            int(nz * 0.2),
+            int(nz * 0.4),
+            int(nz * 0.6),
+            int(nz * 0.8),
+        ]
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 6), constrained_layout=True)
+    # Use consistent color scaling
+    vmin = 0
+    if vmax is None:
+        # vmax = np.percentile(tsnr_map[tsnr_map > 0], 99)
+        vmax = 100
+
+    for ax, slice_idx in zip(axes, slice_indices):
+        slice_data = tsnr_map[slice_idx, :, :]
+
+        im = ax.imshow(slice_data, cmap='plasma', vmin=vmin, vmax=vmax)
+        ax.set_title(f"tSNR Slice {slice_idx}", fontsize=14)
+        add_cross_hair(ax, center_x, center_y)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        # Orientation labels
+        ax.text(0.5, 0.03, 'P', transform=ax.transAxes, ha='center', va='bottom', fontsize=14, color='white')
+        ax.text(0.5, 0.97, 'A', transform=ax.transAxes, ha='center', va='top', fontsize=14, color='white')
+        ax.text(0.03, 0.5, 'R', transform=ax.transAxes, ha='left', va='center', fontsize=14, color='white')
+        ax.text(0.97, 0.5, 'L', transform=ax.transAxes, ha='right', va='center', fontsize=14, color='white')
+
+    # Single shared colorbar
+    cbar = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02)
+    cbar.set_label("tSNR", fontsize=12)
+
+    plt.show()
+
+    # Save figure
+    plot_filename = os.path.join(save_dir, "figure_tsnr_axialslices.png")
+    fig.savefig(plot_filename)
+    print(f"Figure saved: {plot_filename}")
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="Display tSNR results for a given dataset.")
     parser.add_argument("--ref", required=True, help="Path to reference volume file (e.g., NIfTI)")
@@ -98,7 +158,11 @@ def main():
 
     save_dir = os.path.dirname(args.tsnr)
 
-    display_tsnr_results(reference_img, mean_signal, std_signal, tsnr_map, save_dir)
+    display_tsnr_components(reference_img, mean_signal, std_signal, tsnr_map, save_dir)
+    display_tsnr_slices(tsnr_map, save_dir)
+
+    mean_tsnr = np.mean(tsnr_map[tsnr_map > 0])
+    print(f"Mean tSNR of volume: {mean_tsnr:.4f}")
 
 
 if __name__ == "__main__":
