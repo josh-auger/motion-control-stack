@@ -18,8 +18,8 @@ if [ "$MODE" = "all" ]; then
   echo "Starting ALL services..."
 
   # ---- Start services in background ----
-  echo "MOCO_FLAG=$MOCO_FLAG"
-  echo "REG_TYPE=$REG_TYPE"
+  echo "  MOCO_FLAG=$MOCO_FLAG"
+  echo "  REG_TYPE=$REG_TYPE"
   python3 /opt/apps/fire_server/main.py \
     -v -H=0.0.0.0 -p=9002 -S /data \
     --moco="$MOCO_FLAG" \
@@ -27,15 +27,15 @@ if [ "$MODE" = "all" ]; then
     > /dev/null 2>&1 &    # suppress stdout and stderr logs in terminal
   FIRE_PID=$!
 
-  echo "FIFO_FLAG=$FIFO_FLAG"
+  echo "  FIFO_FLAG=$FIFO_FLAG"
   python3 /opt/apps/queue_processor/process_queue_directory.py \
     /data \
     --fifo "$FIFO_FLAG" \
     > /dev/null 2>&1 &    # suppress stdout and stderr log in terminal
   QUEUE_PID=$!
 
-  echo "HEAD_RADIUS=$HEAD_RADIUS"
-  echo "MOTION_THRESH=$MOTION_THRESH"
+  echo "  HEAD_RADIUS=$HEAD_RADIUS"
+  echo "  MOTION_THRESH=$MOTION_THRESH"
   python3 /opt/apps/motion_monitor/monitor_directory.py \
     -p=8080 \
     /data \
@@ -72,8 +72,8 @@ elif [ "$MODE" = "fire-server" ]; then
   MOCO_FLAG="${MOCO_FLAG:-off}"
   REG_TYPE="${REG_TYPE:-smsgroup}"
   echo "Starting fire-server"
-  echo "MOCO_FLAG=$MOCO_FLAG"
-  echo "REG_TYPE=$REG_TYPE"
+  echo "  MOCO_FLAG=$MOCO_FLAG"
+  echo "  REG_TYPE=$REG_TYPE"
 
   exec python3 /opt/apps/fire_server/main.py \
     -v \
@@ -88,7 +88,7 @@ elif [ "$MODE" = "fire-server" ]; then
 elif [ "$MODE" = "queue-processor" ]; then
   FIFO_FLAG="${FIFO_FLAG:-on}"
   echo "Starting queue-processor"
-  echo "FIFO_FLAG=$FIFO_FLAG"
+  echo "  FIFO_FLAG=$FIFO_FLAG"
 
   exec python3 /opt/apps/queue_processor/process_queue_directory.py \
     /data \
@@ -100,8 +100,8 @@ elif [ "$MODE" = "motion-monitor" ]; then
   HEAD_RADIUS="${HEAD_RADIUS:-50}"
   MOTION_THRESH="${MOTION_THRESH:-0.3}"
   echo "Starting motion-monitor"
-  echo "HEAD_RADIUS=$HEAD_RADIUS"
-  echo "MOTION_THRESH=$MOTION_THRESH"
+  echo "  HEAD_RADIUS=$HEAD_RADIUS"
+  echo "  MOTION_THRESH=$MOTION_THRESH"
 
   exec python3 /opt/apps/motion_monitor/monitor_directory.py \
     -p=8080 \
