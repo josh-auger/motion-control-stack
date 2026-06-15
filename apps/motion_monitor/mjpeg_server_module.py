@@ -3,6 +3,8 @@ import threading
 import time
 import numpy as np
 import cv2
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BOUNDARY = "frameboundary"
@@ -35,6 +37,64 @@ def update_frame(jpeg_bytes):
     global latest_jpeg
     with lock:
         latest_jpeg = jpeg_bytes
+
+def add_banner_to_frame(img):
+    """
+    Add banner text to the bottom of an existing image while preserving all plotted data.
+    """
+    output = img.copy()
+    height, width = output.shape[:2]
+    banner_height = 70
+
+    # Create overlay for semi-transparent banner
+    overlay = output.copy()
+    cv2.rectangle(overlay, (0, height - banner_height), (width, height), (40, 40, 40), thickness=-1)
+    # Blend overlay
+    alpha = 0.70
+    cv2.addWeighted(overlay, alpha, output, 1.0 - alpha, 0, output)
+
+    # Timestamp
+    timestamp = datetime.now(ZoneInfo("America/New_York")).strftime("%d-%b-%Y %H:%M:%S %Z")
+
+    # Main message
+    line1 = f"MOTION MONITOR RESET : {timestamp}"
+    line2 = "Awaiting New Sequence..."
+
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.80
+    thickness = 2
+
+    (w1, h1), _ = cv2.getTextSize(line1, font, scale, thickness)
+    (w2, h2), _ = cv2.getTextSize(line2, font, scale, thickness)
+
+    # Position text within the thinner banner
+    y1 = height - 38
+    y2 = height - 12
+
+    cv2.putText(
+        output,
+        line1,
+        ((width - w1) // 2, y1),
+        font,
+        scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        output,
+        line2,
+        ((width - w2) // 2, y2),
+        font,
+        scale,
+        (220, 220, 220),
+        thickness,
+        cv2.LINE_AA
+    )
+
+    return output
 
 class MJPEGHandler(BaseHTTPRequestHandler):
     def do_GET(self):

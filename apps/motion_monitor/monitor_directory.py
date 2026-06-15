@@ -426,6 +426,7 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
                     raise ValueError(f"cv2.imread returned None (failed to read image): {dashboard_filepath}")
 
                 push_img_to_stream(img, 1600, 900)
+                return dashboard_filepath
             except Exception as e:  # Gracefully skip streaming step this time
                 logging.error(f"path='{dashboard_filepath}', error='{e}'")
                 return
@@ -459,8 +460,20 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
             logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
 
         # Export motion table BEFORE wiping state
-        plot_motion_data(input_dir)
+        dashboard_filepath = plot_motion_data(input_dir)
         export_motion_table_csv(output_dir=input_dir)
+
+        # Push final dashboard with reset notification
+        try:
+            if dashboard_filepath and os.path.exists(dashboard_filepath):
+                img = cv2.imread(dashboard_filepath)
+                if img is not None:
+                    logging.info("Displaying reset dashboard frame with banner...")
+                    reset_img = mjpeg_server_module.add_banner_to_frame(img)
+                    push_img_to_stream(reset_img, 1600, 900)
+
+        except Exception as e:
+            logging.error(f"Failed to display reset frame: {e}")
 
         # Reset all state
         # temp_seen = state["seen_files"]
@@ -551,7 +564,7 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
 
                     track_framewise_displacement(new_filepath, state["prior_transform"], head_radius, motion_threshold)
                     # if (state["volcount"] // 5) > (state["last_plotted_volcount"] // 5):    # update dashboard every N volumes
-                    if state["itemcount"] % 25 == 0:
+                    if state["itemcount"] % 20 == 0:
                         plot_motion_data(input_dir)
                         state["last_plotted_volcount"] = state["volcount"]
 
