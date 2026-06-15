@@ -1,10 +1,8 @@
 # Motion-Control-Stack
 
-The **motion-control-stack** implements a real-time, multi-process pipeline for image-based motion estimation and 
-prospective motion correction (MOCO).  
+The **motion-control-stack** implements a real-time, multi-process pipeline for image-based motion estimation and prospective motion correction (MOCO).  
 
-The system operates as a **closed-loop control pipeline**, continuously ingesting image data, estimating motion, and 
-optionally feeding corrections back to the scanner.
+The system operates as a **closed-loop control pipeline**, continuously ingesting image data, estimating motion, and optionally feeding corrections back to the scanner.
 
 ---
 ## 🧱 Core Components
@@ -102,17 +100,63 @@ docker run --rm -it \
   jauger/motion-control-stack:dev all
 ```
 
-### Running the Stack
-After configuring the desired parameters in the bash run script, start all services with:
+### Starting the Stack
+After configuring the desired parameters in the bash run script, start the complete motion-control stack with:
 ```bash
 sh start_motion_control_stack.sh
 ```
 
-This launches the complete motion-control stack of services:
-- **Fire-Server** receives and collates image data from the scanner and optionally sends prospective motion-correction
-feedback back to the scanner.
+This launches all motion-control sub-process services within a single Docker container:
+- **Fire-Server** receives and collates image data from the scanner and optionally sends prospective motion-correction feedback back to the scanner.
 - **Queue-Processor** performs image registration and motion estimation on the received image data.
 - **Motion-Monitor** computes and streams motion metrics in real time.
+
+During operation, the services automatically detect the end of an imaging sequence (including early termination by the MRI control computer), reset their internal state, and wait for the next sequence to begin.
+
+All services continue running until the container is explicitly stopped.
+
+### Stopping the Stack
+#### Option 1: Stop from the Launch Terminal
+If the container is running in the foreground terminal, stop all services and shut down the Docker container by pressing `Ctrl+C`.
+
+This triggers the container shutdown handler and gracefully terminates all running services.
+
+#### Option 2: Stop the Docker Container Directly
+If the stack is running in the background or from a different terminal session, first identify the running container with:
+
+```bash
+docker ps
+```
+
+or
+
+```bash
+docker container ls
+```
+
+Example output:
+
+```text
+CONTAINER ID   IMAGE                            STATUS
+a1b2c3d4e5f6   jauger/motion-control-stack:dev  Up 15 minutes
+```
+
+Then, stop the specific container using its container ID:
+
+```bash
+docker stop a1b2c3d4e5f6
+```
+
+Docker will send a termination signal to the container and gracefully stop all motion-control services.
+
+#### Verify Shutdown
+To verify that the container is no longer running:
+
+```bash
+docker ps -a
+```
+
+The motion-control-stack container should no longer appear in the list of running containers.
 
 ---
 ## ⚠️ Design Considerations
@@ -157,8 +201,4 @@ or until a new MoCo feedback packet is received.
 This forms a closed-loop control system that continuously estimates subject motion and updates scan geometry during 
 image acquisition. 
 
-⚠️ It is important to note that the Motion-Monitor is agnostic to any image queue clearing and will calculate framewise 
-displacements between whichever two subsequent alignment transforms are produced, and transmit those motion results. 
-If, in the interest of latency, stale image data has been skipped in favor of more recent image data, the motion traces 
-reported by the Motion-Monitor will also have that data omitted. For a more complete trace of a subject's continuous 
-motion pattern during a scan, it is recommended to run a retrospective motion analysis on the un-corrected image data.
+⚠️ IMPORTANT NOTE: The Motion-Monitor service is agnostic to any image queue clearing and will calculate framewise displacements between whichever two subsequent alignment transforms are produced, and transmit those motion results. If, in the interest of latency, stale image data has been skipped in favor of more recent image data (`FIFO_FLAG` = `off`), then the motion traces reported by the Motion-Monitor will also have that data omitted. For a more complete trace of a subject's continuous motion pattern during a scan, it is recommended to run a retrospective motion analysis on the un-corrected image data.
