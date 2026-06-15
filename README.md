@@ -7,44 +7,6 @@ The system operates as a **closed-loop control pipeline**, continuously ingestin
 optionally feeding corrections back to the scanner.
 
 ---
-## 🔄 High-Level Pipeline
-```mermaid
-flowchart LR
-
-A[MRD Stream] --> B[Fire Server]
-
-B --> B1[Parse MRD]
-B1 --> B2[Write .nhdr]
-B1 --> B3[Write .raw]
-B1 --> B4[Write pointer .txt]
-
-B4 --> C[Queue Processor]
-C --> C1[Load .nhdr + .raw]
-C1 --> C2[Run sms-mi-reg Registration]
-
-C2 --> D[Transform File (.tfm)]
-
-D --> E[Motion Monitor]
-E --> E1[Framewise Displacement]
-E1 --> E2[Motion Classification]
-E2 --> E3[Live Visualization]
-
-D --> F{MOCO Enabled?}
-
-F -->|Yes| G[Fire Server MOCO Handler]
-G --> H[Convert to Scanner Frame]
-H --> I[Send Feedback Packet]
-I --> A
-
-subgraph S[Shared Data Volume (/data)]
-B2
-B3
-B4
-D
-end
-```
-
----
 ## 🧱 Core Components
 
 ### 🔥 Fire-Server
@@ -175,7 +137,7 @@ Considerations:
 - File I/O performance can directly impact end-to-end latency
 
 ---
-## ⚡ Configuration for Prospective Motion Correction
+## 🔄 Configuration for Prospective Motion Correction
 For prospective motion correction (MOCO), low latency is generally preferred over processing every image.
 
 Therefore, the recommended settings are:
