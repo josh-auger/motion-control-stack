@@ -65,6 +65,7 @@ def plot_deltas_with_volumes(deltas, slices_per_volume):
 
     plt.xlim(0, len(deltas))
     # plt.xlim(50, 60)
+    # plt.ylim(0.0, 0.01)
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
     plt.xlabel("Image index i", fontsize=14)
@@ -103,7 +104,6 @@ def main():
     deltas = compute_deltas(unix_times)
 
     plot_deltas_with_volumes(deltas, slices_per_volume)
-
     print(f"Mean time delay between image slices: {np.mean(deltas)}")
     print(f"Std dev time delay between image slices: {np.std(deltas)}")
 
