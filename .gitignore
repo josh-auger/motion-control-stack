@@ -3,6 +3,7 @@
 # Tarballs of docker images
 *.tar
 *.tar.gz
+*.img
 
 # Python cache / temp files
 __pycache__/
