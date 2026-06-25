@@ -3,8 +3,10 @@
 Title: identify_reference_volume.py
 
 Description:
-Identify the first suitable 3D image volume from a 4D nifti file to use as a reference volume for motion characterization.
-Reference volume must be free of intra-volume motion when compared to the corresponding slices of the subsequent volume acquisition.
+Identify suitable 3D image volume from a 4D nifti file to use as a reference volume for motion characterization.
+Reference volume must be free of intra-volume motion when compared to the subsequent volume acquisition.
+
+The presence of intra-volume motion is determined by computing the normalized cross-correlation (NCC) between slice groups in each volume.
 
 Author: Joshua Auger (joshua.auger@childrens.harvard.edu), Computational Radiology Lab, Boston Children's Hospital
 Date of creation: June 22, 2026
@@ -82,7 +84,6 @@ def compute_group_ncc(volume_a, volume_b, slice_groups):
     for group_time, slice_indices in slice_groups.items():
         group_a = volume_a[:, :, slice_indices]
         group_b = volume_b[:, :, slice_indices]
-
         results[group_time] = normalized_cross_correlation(group_a, group_b)
 
     return results
@@ -179,11 +180,12 @@ def main():
 
         best = min(comparison_stats, key=lambda x: x["range_ncc"])
 
-        print("\nMost stable volume pair:")
+        print("\nMost stable volume pair (smallest NCC range):")
         print(f"  Volume {best['volume']} vs Volume {best['volume'] + 1}")
         print(f"  Min NCC   = {best['min_ncc']:.4f}")
         print(f"  Mean NCC  = {best['mean_ncc']:.4f}")
         print(f"  Range NCC = {best['range_ncc']:.4f}")
+
 
     if args.plot:
         volume_indices = [stat["volume"] for stat in comparison_stats]
@@ -195,12 +197,12 @@ def main():
         # Minimum NCC
         ax1.plot(volume_indices, min_ncc_values, marker="o")
         ax1.axhline(y=args.threshold, linestyle="--")
-        ax1.set_ylabel("Min NCC")
+        ax1.set_ylabel("Min slice group NCC")
         ax1.grid(True)
 
         # NCC Range
         ax2.plot(volume_indices, range_ncc_values,marker="s")
-        ax2.set_ylabel("NCC Range")
+        ax2.set_ylabel("Range slice group NCC")
         ax2.set_xlabel("Volume Comparison Index")
         ax2.grid(True)
 

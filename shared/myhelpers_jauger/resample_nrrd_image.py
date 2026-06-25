@@ -70,14 +70,14 @@ def resample_nrrd_volume(input_nhdr_path, upsample_factor=0.9, output_nhdr_path=
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Downsample an ITK image.")
-    parser.add_argument("--inputnrrd", required=True, help="Path to the input image file.")
+    parser = argparse.ArgumentParser(description="Resample an ITK image.")
+    parser.add_argument("--inputnrrd", required=True, help="Path to the input NRRD image file (.nhdr detached header file).")
     parser.add_argument("--outputnrrd", required=False, help="Filename for the output image.")
-    parser.add_argument("--factor", type=float, default=2.0, help="Downsampling factor applied to all axes (default: 2.0).")
+    parser.add_argument("--factor", type=float, default=1.0, help="Resampling factor applied to all axes (>1 = downsample, <1 = upsample).")
     args = parser.parse_args()
 
     resampled_image_path = resample_nrrd_volume(args.inputnrrd, args.factor)
-    print(f"Downsampled image saved as: {resampled_image_path}")
+    print(f"Resampled image saved as: {resampled_image_path}")
 
 
 if __name__ == "__main__":
