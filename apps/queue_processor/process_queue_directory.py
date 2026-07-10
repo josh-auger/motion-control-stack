@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import json
+from myhelpers_jauger.resample_nrrd_image import resample_nrrd_volume
 
 
 def setup_logging(log_dir):
@@ -132,7 +133,7 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
             return None
 
     # Call sms-mi-reg executable with local filepath inputs
-    optimizer = "LN_BOBYQA"
+    optimizer = "LN_SBPLX"
     maxiterations = "1000"
     run_command = [
                       "/opt/moco/bin/sms-mi-reg",
@@ -406,11 +407,15 @@ def monitor_directory(input_dir, fifo_flag):
 
     def initialize_reference_volume(input_dir, target_paths):
         """Set first batch as reference volume."""
-        state["reference_volume_filepath"] = target_paths[0]
+        # Upsample first image volume and set to be reference volume for registrations
+        state["reference_volume_filepath"] = resample_nrrd_volume(target_paths[0], upsample_factor=0.51)
+        # state["reference_volume_filepath"] = target_paths[0]
         logging.info(f"Provisional reference volume set to : {state['reference_volume_filepath']}")
 
+        # Create an identity transform file centered at the spatial center of the reference volume
         identity_transform_path = create_identityTransformFile(input_dir, state["reference_volume_filepath"], state["regcount"], state["volcount"], state["groupcount"])
 
+        # Extract slice timings from metadata JSON file
         slice_timings = read_slice_timings_from_json(state["metadata_filepath"])
         state["slice_timings"] = slice_timings
 
@@ -497,8 +502,7 @@ def monitor_directory(input_dir, fifo_flag):
             logging.info(f"Found {len(new_files)} new file(s) to process")
 
             # Determine if fifo processing is "off" and need to "pick newest only" logic
-            apply_fifo_filter = fifo_disabled and state["metadata_filepath"] is not None and state["reference_volume_filepath"] is not None
-            if apply_fifo_filter:
+            if fifo_disabled and state["metadata_filepath"] is not None and state["reference_volume_filepath"] is not None:
                 new_files = pick_newest_files(new_files)  # Keep only newest file
 
             # Process each new file
