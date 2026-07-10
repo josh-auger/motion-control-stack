@@ -9,17 +9,20 @@ README.md
 /doc
 
 # Bash scripts for Docker build/run
-*.sh
+# *.sh
 
 # Tarballs
 *.tar
 *.tar.gz
+*.img
 
 # Python cache / temp files
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+/shared/myhelpers_jauger/.venv/
+.vscode/
 
 # OS / editor junk
 .DS_Store
