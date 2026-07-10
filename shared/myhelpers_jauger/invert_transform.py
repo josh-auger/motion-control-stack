@@ -47,7 +47,7 @@ print("opposite transform (inverse rotation, flipped translation):")
 print(read_transform1_opposite)
 
 # Write converted transform
-if args.outputtransform:
+if args.outputtransformfile:
     output_filename = args.outputtransformfile
 else:
     base, ext = os.path.splitext(args.inputtransformfile)

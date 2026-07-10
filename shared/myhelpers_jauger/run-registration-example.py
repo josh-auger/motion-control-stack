@@ -56,7 +56,7 @@ else:
 
 if args.inputtransformfile is None:
     inputTransformFileName = "identity-centered.tfm"
-    subprocess.run( dockerprefix +  [ "crl/sms-mi-reg", "crl-identity-transform-at-volume-center.py", 
+    subprocess.run( dockerprefix +  [ "crl/sms-mi-reg:latest", "crl-identity-transform-at-volume-center.py", 
     "--refvolume", args.refvolume, 
     "--transformfile", inputTransformFileName ] )
 else:
@@ -69,7 +69,7 @@ print([ "crl/sms-mi-reg", "sms-mi-reg", args.refvolume, inputTransformFileName, 
 
 # Run an example registration:
 # Build base run command
-cmd = dockerprefix + ["crl/sms-mi-reg"] + valgrind_command + ["sms-mi-reg",
+cmd = dockerprefix + ["crl/sms-mi-reg:latest"] + valgrind_command + ["sms-mi-reg",
     args.refvolume,
     inputTransformFileName,
     args.outputtransformfile
@@ -84,7 +84,7 @@ if args.maxiterations is not None:
 print("Full run command :", cmd)
 subprocess.run(cmd, check=True)
 
-# subprocess.run( dockerprefix + ["crl/sms-mi-reg"] + valgrind_command + ["sms-mi-reg",
+# subprocess.run( dockerprefix + ["crl/sms-mi-reg:latest"] + valgrind_command + ["sms-mi-reg",
 #     args.refvolume,
 #     inputTransformFileName,
 #     args.outputtransformfile ] + args.slicetarget
