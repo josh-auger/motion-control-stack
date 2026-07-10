@@ -113,6 +113,8 @@ COPY ../apps/motion_monitor         /opt/apps/motion_monitor
 COPY ../apps/queue_processor        /opt/apps/queue_processor
 COPY ../shared                      /opt/shared
 
+ENV PYTHONPATH=/opt/shared
+
 # ENTRYPOINT
 COPY ./docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
