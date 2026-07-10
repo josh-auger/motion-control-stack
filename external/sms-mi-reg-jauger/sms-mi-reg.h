@@ -47,7 +47,7 @@ float n[ARRAY_SIZE][pad];
 // Parameters associated with computing mutual information
 // We need one histogram for each thread as they can't be written to
 // in parallel.
-const int MaxNumBins = 66;
+const int MaxNumBins = 66;     // JDA: Desired N bins + 2 for underflow and overflow
 float jointHistograms[MAX_NUM_THREADS*MaxNumBins*MaxNumBins][pad];
 float marginalFixed[MaxNumBins][pad];
 float marginalMoving[MaxNumBins][pad];

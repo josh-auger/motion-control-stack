@@ -864,7 +864,7 @@ int main(int argc, char *argv[])
   quill::Backend::start(backend_options);
 
   // The maximum number of bins allowed by the memory allocation is MaxNumBins
-  // JDA: Here, set nbins to the actual number of bins used to populate the joint histogram
+  // JDA: Here, set nbins to actual number of bins to populate joint histogram (MaxNumBins - 2 to avoid first and last overflow bins)
   int nbins = 64;
   std::cout << "nbins used for joint histogram : " << nbins << std::endl;
 
@@ -1399,17 +1399,17 @@ int main(int argc, char *argv[])
   const ImageType::SpacingType & sp = inputRefVolImage->GetSpacing();
   const ImageType::RegionType region = inputRefVolImage->GetLargestPossibleRegion();
   // Set initial step sizes for translation parameters:
-  initial_step_sizes[3] = sp[0] * 0.5;
-  initial_step_sizes[4] = sp[1] * 0.5;
-  initial_step_sizes[5] = sp[2] * 0.5;
+  initial_step_sizes[3] = sp[0] * 1.6;
+  initial_step_sizes[4] = sp[1] * 1.6;
+  initial_step_sizes[5] = sp[2] * 1.6;
   // Set initial step sizes for rotation parameters:
   // Heuristic - set the step size in radians to the number of radians
   // that is approximately a tenth of a voxel step at the edge of the image.
   // Estimate the diameter by a fraction of the distance across the field of view.
   // step size theta = arc length / radius.
-  initial_step_sizes[0] = 0.5 * sp[0]/(region.GetSize()[0]*sp[0]*0.5);
-  initial_step_sizes[1] = 0.5 * sp[1]/(region.GetSize()[1]*sp[1]*0.5);
-  initial_step_sizes[2] = 0.5 * sp[2]/(region.GetSize()[2]*sp[2]*0.5);
+  initial_step_sizes[0] = 1.6 * sp[0]/(region.GetSize()[0]*sp[0]*0.5);
+  initial_step_sizes[1] = 1.6 * sp[1]/(region.GetSize()[1]*sp[1]*0.5);
+  initial_step_sizes[2] = 1.6 * sp[2]/(region.GetSize()[2]*sp[2]*0.5);
 
   // Set the optimizer initial step sizes
   opt.set_initial_step( initial_step_sizes );
