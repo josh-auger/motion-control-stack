@@ -118,6 +118,7 @@ class handleData:
                 img_framenumber = ismrmrd_image.getHead().user_float[7]
                 logging.info(f"\tImage header frame number : {img_framenumber}")
                 logging.info(f"\tImage position (center) : {[ismrmrd_image.position[x] for x in range(3)]}")
+                logging.info(f"\tImage acquisition time : {ismrmrd_image.acquisition_time_stamp}")
 
                 # save raw image bytes to disk
                 img_filename = self.save_raw_image_from_ismrmrd_data(data_bytes)
@@ -134,6 +135,7 @@ class handleData:
                     self.save_nrrd_slice_from_ismrmrd_data(ismrmrd_image, img_filename)
                     self.groupcount += 1
                     logging.info(f"\tVolume {self.volcount} group {floor(self.sliceNo / self.groupsize)} : {self.groupcount}/{self.groupsize}")
+                    
                     # JDA: when desired group size is reached (slice, slice group, volume), generate group pointer file
                     if self.groupcount == self.groupsize:
                         recent_group = imgGroup[-self.groupsize:]
@@ -153,11 +155,9 @@ class handleData:
                         logging.exception("Error during motion correction feedback.")
 
                 if len(imgGroup) == self.nslices_per_volume:
-                    # sort ismrmrd image items by image center z-position (low to high, neg to pos)
-                    imgGroup = self.sort_image_slices_by_z_position(imgGroup)
-
                     if self.volcount == 0:
-                        self.series_metadata_dict = self.save_series_metadata_to_json(imgGroup) # includes slice timings
+                        imgGroup = self.sort_image_slices_by_z_position(imgGroup)   # sort slices by image center z-position (low to high, neg to pos)
+                        self.series_metadata_dict = self.save_series_metadata_to_json(imgGroup) # extract slice timings from first volume for metadata
 
                         # grab the image coordinate frame (direction cosines) from first image of first volume
                         logging.info(f"Establishing image coordinate frame from reference volume :")
@@ -167,12 +167,11 @@ class handleData:
                         self.refImgOrigin = self.get_first_voxel_center(imgGroup[0]['image'])
 
                         self.save_nrrd_volume_from_ismrmrd_data(imgGroup)  # Save as NRRD format, undo moco feedback when writing NHDR header
-                    # else:
-                    #     self.save_nrrd_volume_from_ismrmrd_data(imgGroup)
 
-                    imgGroup = []   # make sure imgGroup gets cleared after each volume compilation
+                    imgGroup = []       # clear imgGroup after each volume compilation
                     self.sliceNo = 0    # reset slice count to 0 for next volume
-                    self.volcount += 1
+                    self.volcount += 1  # keep running count of acquired volumes
+                    self.groupcount = 0  # reset group count for next volume
 
             elif item[0] == 4:
                 logging.info(f"Received [{item[0]}] close message.")
@@ -500,7 +499,7 @@ class handleData:
                 self.groupsize = 1
             elif self.registration_type == "smsgroup":
                 self.groupsize = self.sms_factor
-                # self.groupsize = 2
+                # self.groupsize = 46  # JDA: for testing, force grouping of X image slices together for registration
             elif self.registration_type == "volume":
                 self.groupsize = self.nslices_per_volume
             else:
