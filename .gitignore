@@ -4,6 +4,7 @@
 *.tar
 *.tar.gz
 *.img
+*.img.zip
 
 # Python cache / temp files
 __pycache__/
@@ -21,3 +22,7 @@ venv/
 # Data directories / test files
 data/
 *.log
+shared/myhelpers_jauger/*.tfm
+shared/myhelpers_jauger/*.nii*
+shared/myhelpers_jauger/*.nrrd
+shared/myhelpers_jauger/*.csv

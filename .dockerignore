@@ -15,6 +15,7 @@ README.md
 *.tar
 *.tar.gz
 *.img
+*.img.zip
 
 # Python cache / temp files
 __pycache__/
@@ -34,3 +35,7 @@ data/
 *.log
 /apps/python_fire_server/connection_from_siemens_20250409.py
 /apps/python_fire_server/invertcontrast.py
+shared/myhelpers_jauger/*.tfm
+shared/myhelpers_jauger/*.nii
+shared/myhelpers_jauger/*.nrrd
+shared/myhelpers_jauger/*.csv
