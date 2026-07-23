@@ -162,7 +162,7 @@ def plot_cumulative_displacement(motion_df, output_filename="", threshold=None):
 
 
 def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", threshold=None, num_expected_volumes=None,
-                          num_moved_volumes=None, host_ip=None, host_port=None):
+                          num_moved_volumes=None, host_ip=None, host_port=None, livestream_enabled=False):
     """
     motion_df = pandas DataFrame loaded from the motion CSV file
     Generate a combined motion report figure (framewise displacement, motion summary, motion parameters) to push to a
@@ -275,18 +275,22 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
     ax_sum.grid(axis='y', alpha=0.3)
 
     # --- Status panel (top right) ---
-    if host_ip is None:
-        host_ip = "N/A"
-    if host_port is None:
-        host_port = "N/A"
-
     wrapped_protocol = "\n".join(textwrap.wrap(protocol_name, width=36)) \
         if protocol_name else "N/A"
 
+    if livestream_enabled:
+        stream_info = (
+            f"Host: {host_ip}\n"
+            f"Port: {host_port}\n"
+            f"http://{host_ip}:{host_port}/stream.mjpg\n\n"
+        )
+    else:
+        stream_info = (
+            "Livestream: Disabled\n\n"
+        )
+    
     status_text = (
-        f"Host: {host_ip}\n"
-        f"Port: {host_port}\n"
-        f"http://{host_ip}:{host_port}/stream.mjpg\n\n\n"
+        stream_info + 
         "Motion Summary\n"
         "-------------------------\n"
         f"Protocol name:\n{wrapped_protocol}\n\n"

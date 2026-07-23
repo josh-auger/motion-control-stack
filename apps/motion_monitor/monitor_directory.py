@@ -192,7 +192,7 @@ def push_img_to_stream(img, width, height, jpeg_quality=80):
         mjpeg_server_module.update_frame(jpeg.tobytes())
 
 
-def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
+def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, stream_flag):
     """Monitor directory for new image files without deleting any."""
     # Initialization
     # -------------------------------------------
@@ -415,7 +415,8 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
                 num_expected_volumes=state['total_repetitions'],
                 num_moved_volumes=state['volume_motion_count'],
                 host_ip=host_ip,
-                host_port=PORT)
+                host_port=PORT,
+                livestream_enabled=(stream_flag == "on"))
 
             # Safe image load and stream push
             try:
@@ -425,7 +426,9 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
                 if img is None:
                     raise ValueError(f"cv2.imread returned None (failed to read image): {dashboard_filepath}")
 
-                push_img_to_stream(img, 1600, 900)
+                if stream_flag == "on":
+                    push_img_to_stream(img, 1600, 900)
+
                 return dashboard_filepath
             except Exception as e:  # Gracefully skip streaming step this time
                 logging.error(f"path='{dashboard_filepath}', error='{e}'")
@@ -487,12 +490,16 @@ def monitor_directory(input_dir, stream_port, head_radius, motion_threshold):
     # =====================================================================
     # ESTABLISH SERVER
     # =====================================================================
-    # http_url = "http://0.0.0.0:8080/stream.mjpg"
     PORT = stream_port
-    mjpeg_server_module.start_server(PORT)
-    host_ip = get_host_ip()
-    logging.info(f"Motion Monitor stream available on host at: http://{host_ip}:{PORT}/stream.mjpg")
-    logging.info(f"\tIF running on crlreconmri server, use crlreconmri host IP address: http://10.27.192.112:{PORT}/stream.mjpg")
+    host_ip = None
+
+    if stream_flag == "on":
+        mjpeg_server_module.start_server(PORT)
+        host_ip = get_host_ip()
+        logging.info(f"Motion Monitor stream available on host at: http://{host_ip}:{PORT}/stream.mjpg")
+        logging.info(f"\tIF running on crlreconmri server, use crlreconmri host IP address: http://10.27.192.112:{PORT}/stream.mjpg")
+    else:
+        logging.info(f"Motion Monitor stream disabled (stream_flag={stream_flag}).")
 
     # =====================================================================
     # MAIN MONITOR LOOP
@@ -582,14 +589,16 @@ def main():
     # Pull defaults from environment variables
     default_radius = float(os.environ.get("HEAD_RADIUS", "50"))
     default_threshold = float(os.environ.get("MOTION_THRESH", "0.3"))
+    default_stream = os.environ.get("STREAM_FLAG", "on")
 
     parser.add_argument("--head_radius", type=float, default=default_radius, help="Assumed head radius (mm) for displacement calculation")
     parser.add_argument("--motion_threshold", type=float, default=default_threshold, help="Framewise displacement threshold (mm) for flagging motion")
+    parser.add_argument("--webstream", choices=["on", "off"], default=default_stream, help="Toggle MJPEG web streaming ('on' or 'off')")
     parser.add_argument('-p', '--port', type=int, help='Port')
     args = parser.parse_args()
 
     setup_logging(args.input_directory)
-    monitor_directory(args.input_directory, args.port, args.head_radius, args.motion_threshold)
+    monitor_directory(args.input_directory, args.head_radius, args.motion_threshold, args.port, args.webstream)
 
 if __name__ == "__main__":
     main()
