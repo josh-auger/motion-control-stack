@@ -4,6 +4,9 @@ set -e
 MODE="$1"
 shift || true
 
+# Configure Python module search path to include /shared directory
+export PYTHONPATH="/opt/shared${PYTHONPATH:+:$PYTHONPATH}"
+
 # Set working directory for all generated outputs
 # Docker launcher should override default to use WORKDIR=/data
 # MARS chroot launch will default to use WORKDIR=/tmp/share
@@ -30,6 +33,7 @@ log "Motion Control Stack"
 log "Started: $(date)"
 log "MODE=$MODE"
 log "WORKDIR=$WORKDIR"
+log "PYTHONPATH=$PYTHONPATH"
 log "========================================"
 
 
