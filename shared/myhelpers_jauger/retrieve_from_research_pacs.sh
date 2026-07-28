@@ -1,7 +1,7 @@
 #!/bin/bash
 
-MRN=4780316
-StudyDate=20260617
+MRN=6166089
+StudyDate=20260709
 
 # Pull data from Research Synapse:
 sudo docker run --rm -it -u $(id -u):$(id -g) \

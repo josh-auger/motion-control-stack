@@ -78,6 +78,8 @@ if [ "$MODE" = "all" ]; then
 
 
   log "Launching queue-processor..."
+  # JDA: Once queue-processor invokes SLIMM CUDA SVR, add a startup GPU health check (for example nvidia-smi)
+  # JDA: and fail clearly if the container was not launched with an NVIDIA GPU runtime.
   python3 /opt/apps/queue_processor/process_queue_directory.py \
     "$WORKDIR" \
     --fifo "$FIFO_FLAG" \
@@ -164,6 +166,8 @@ elif [ "$MODE" = "queue-processor" ]; then
   log "Starting queue-processor"
   log "  WORKDIR=$WORKDIR"
   log "  FIFO_FLAG=$FIFO_FLAG"
+  # JDA: Keep this single-service path behavior aligned with `all`: it also needs GPU availability checks
+  # JDA: after the registration command is migrated to cuda-standalone-registration.
 
   exec python3 /opt/apps/queue_processor/process_queue_directory.py \
     "$WORKDIR" \

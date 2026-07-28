@@ -5,6 +5,8 @@
 # Description:
 # Monitors a specified input directory for image files being written into the directory. New image files are identified
 # and sent to sms-mi-reg for mutual information-based image registration.
+# JDA: Replace the sms-mi-reg subprocess below with the SLIMM-V3
+# JDA: cuda-standalone-registration workflow after its CLI can write a compatible .tfm result.
 
 # Created on: March 2025
 # Created by: Joshua Auger (joshua.auger@childrens.harvard.edu), Computational Radiology Lab, Boston Children's Hospital
@@ -98,6 +100,9 @@ def create_identityTransformFile(input_dir, reference_volume_filepath, indexcoun
 
 def select_input_transform(input_dir, identityTransform_filepath, counter, reference_volume_flag):
     """Identify prior alignment transform file (.tfm) as input initialization transform in next registration call."""
+    # JDA: The GPU executable accepts --init "rx ry rz tx ty tz", not a .tfm path.
+    # JDA: Add a reader/converter here that extracts the prior SimpleITK transform as the GPU
+    # JDA: Euler parameter ordering and verifies its rotation center matches the reference volume center.
     if reference_volume_flag == 0:
         logging.info(f"Still calibrating reference volume. Input transform for registration : {identityTransform_filepath}")
         return identityTransform_filepath
@@ -132,6 +137,13 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
             logging.info(f"Registration FAILED. {label} file not found : {fpath}")
             return None
 
+    # JDA: Replace this sms-mi-reg command with /opt/slimm/bin/cuda-standalone-registration.
+    # JDA: Its argument order is <reference-volume> [--init "rx ry rz tx ty tz"] <target-slice>...;
+    # JDA: preserve every target in this pointer group so SMS groups remain one shared SVR optimization.
+    # JDA: Before switching, extend main-stand-alone.cu to accept an explicit output path and atomically
+    # JDA: write alignTransform_<registration-index>.tfm rather than only printing parameters to stdout.
+    # JDA: The written transform must be validated against the current sms-mi-reg fixed-to-moving convention,
+    # JDA: SimpleITK transform type/center, and coordinate-frame expectations used by motion-monitor and FIRE MoCo.
     # Call sms-mi-reg executable with local filepath inputs
     optimizer = "LN_SBPLX"
     maxiterations = "1000"
@@ -407,6 +419,9 @@ def monitor_directory(input_dir, fifo_flag):
 
     def initialize_reference_volume(input_dir, target_paths):
         """Set first batch as reference volume."""
+        # JDA: Confirm the resampled reference geometry is also the geometry supplied to the GPU executable.
+        # JDA: The current GPU SVR derives each target's z-index from origin/spacing and requires target x/y
+        # JDA: dimensions, spacing, direction, and z-origin to be compatible with this reference volume.
         # Upsample first image volume and set to be reference volume for registrations
         state["reference_volume_filepath"] = resample_nrrd_volume(target_paths[0], upsample_factor=0.51)
         # state["reference_volume_filepath"] = target_paths[0]
@@ -442,6 +457,9 @@ def monitor_directory(input_dir, fifo_flag):
         # input_transform = identity_transform_path
 
         output_string = f"{state['regcount']:04d}_{state['volcount']:04d}-{state['groupcount']:04d}"
+        # JDA: Carry this registration/volume/group identity into the GPU output filename. Existing consumers
+        # JDA: currently discover alignTransform_<regcount>.tfm, so either preserve that exact name or update
+        # JDA: maybe_update_reference, fire-server, and motion-monitor together to use the new naming contract.
         run_MIregistration(state["reference_volume_filepath"], target_paths, input_transform, output_string)
 
     def maybe_update_reference(input_dir, pointer_filepath):

@@ -35,6 +35,10 @@ MOTION_THRESH=0.3
 # Toggle web streaming in motion-monitor ("on", "off")
 STREAM_FLAG="on"
 
+# JDA: When queue-processor switches to SLIMM CUDA SVR, add `--gpus all` to the Docker command below.
+# JDA: The host must have NVIDIA drivers and NVIDIA Container Toolkit installed; make this configurable if
+# JDA: CPU-only deployments must continue to use the existing sms-mi-reg registration path.
+
 
 # Docker Run Command
 # =====================================

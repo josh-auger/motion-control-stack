@@ -277,6 +277,9 @@ class handleData:
         """
         Search data directory for all transform files with extension .tfm and grab the most recently modified file.
         """
+        # JDA: GPU SVR integration must publish each completed .tfm atomically and only after full validation.
+        # JDA: This consumer currently selects the newest .tfm by mtime, so temporary/partial GPU outputs or
+        # JDA: changed filename conventions could send an incorrect transform back to the scanner.
         VALID_EXTENSIONS = {'.tfm'}
         transform_files = []
         for f in os.listdir(self.datafolder):
@@ -392,6 +395,8 @@ class handleData:
             logging.info("No new transform file found. Skipping moco feedback.")
             return
 
+        # JDA: Validate the SLIMM GPU transform direction, Euler convention, center, and image coordinate frame
+        # JDA: against sms-mi-reg before reusing this MoCo conversion. Do not assume the existing X-flip remains valid.
         # Convert sms-mi-reg alignment transform to device coordinate frame for MOCO (import functions from convert_transform_for_moco.py)
         moco_transform = convert_transform_for_moco(versor_transform, self.refImgCoordFrame)
         logging.info(f"Moco transform to be sent to scanner :")

@@ -554,6 +554,9 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
 
                 # Handle transform files
                 if ext == ".tfm":
+                    # JDA: Preserve a SimpleITK-readable rigid .tfm output from GPU SVR, including its center and
+                    # JDA: reference/target convention. Confirm filename parsing and framewise displacement remain
+                    # JDA: correct when one transform represents an SMS slice group rather than a whole volume.
                     get_counters_from_filename(new_filepath)
                     state["itemcount"] += 1
                     if state["itemcount"] == 1:

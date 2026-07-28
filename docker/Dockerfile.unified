@@ -71,6 +71,11 @@ RUN cd /usr/src && \
 
 # STAGE 3: COMPILE SMS-MI-REG
 # ============================================================
+# JDA: Retain sms-mi-reg during validation, then add a parallel SLIMM-V3 CUDA build stage here.
+# JDA: That stage must use an NVIDIA CUDA *devel* base and build the SLIMM standalone dependencies
+# JDA: (CUDA, SimpleITK/ITK, NLopt, ACE, Ceres, glog, gflags, and OpenMP), then install
+# JDA: cuda-standalone-registration at a stable runtime path such as /opt/slimm/bin/.
+# JDA: The current shared-base-build image is python:3.10-slim and cannot compile or execute CUDA code.
 RUN mkdir -p /usr/src/moco
 COPY ../external/sms-mi-reg-jauger /usr/src/moco
 
@@ -89,11 +94,14 @@ ENV MOCO_DIR=/opt/moco/lib/cmake/moco
 
 # FINAL RUNTIME IMAGE
 # ============================================================
+# JDA: The runtime image must ultimately be CUDA-compatible as well; copy CUDA runtime libraries and preserve
+# JDA: NVIDIA-container-runtime compatibility so queue-processor can invoke the GPU executable.
 FROM shared-base-build AS runtime
 
 # runtime environment
 ENV LD_LIBRARY_PATH=/opt/itk/lib:/opt/nlopt/lib:/opt/moco/lib
 ENV PATH=/opt/moco/bin:${PATH}
+# JDA: When the SLIMM binary is added, prepend /opt/slimm/bin here and set its required library paths.
 
 # ISMRMRD artifacts
 COPY --from=base /usr/local/include/ismrmrd /usr/local/include/ismrmrd/
