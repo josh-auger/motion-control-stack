@@ -77,7 +77,7 @@ def plot_deltas_with_volumes(deltas, slices_per_volume, title, ylabel):
 
     plt.xlim(0, len(deltas))
     # plt.xlim(50, 60)
-    plt.ylim(0.065, 0.095)
+    # plt.ylim(0.065, 0.095)
     plt.xticks(fontsize=12)
     plt.yticks(fontsize=12)
     plt.xlabel("Image index i", fontsize=14)

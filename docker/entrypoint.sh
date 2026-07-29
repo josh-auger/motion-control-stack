@@ -10,7 +10,7 @@ export PYTHONPATH="/opt/shared${PYTHONPATH:+:$PYTHONPATH}"
 # Set working directory for all generated outputs
 # Docker launcher should override default to use WORKDIR=/data
 # MARS chroot launch will default to use WORKDIR=/tmp/share
-WORKDIR="${WORKDIR:-/tmp/share}"
+export WORKDIR="${WORKDIR:-/tmp/share}"
 
 # Verify working directory before attempting to launch services
 if [ ! -d "$WORKDIR" ]; then

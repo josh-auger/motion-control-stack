@@ -873,29 +873,6 @@ int main(int argc, char *argv[])
     std::exit(1);
   }
 
-  // Frontend
-//  auto file_sink = quill::Frontend::create_or_get_sink<quill::FileSink>(
-//    "example_file_logging.log",
-//    []()
-//    {
-//      quill::FileSinkConfig cfg;
-//      cfg.set_open_mode('w');
-//      cfg.set_filename_append_option(quill::FilenameAppendOption::StartDateTime);
-//      return cfg;
-//    }(),
-//    quill::FileEventNotifier{});
-//
-//  quill::Logger* logger = quill::Frontend::create_or_get_logger(
-//    "root", std::move(file_sink),
-//    quill::PatternFormatterOptions{"%(time) [%(thread_id)] %(short_source_location:<28) "
-//                                          "LOG_%(log_level:<9) %(logger:<12) %(message)",
-//                                   "%H:%M:%S.%Qns", quill::Timezone::GmtTime});
-//
-//  // set the log level of the logger to debug (default is info)
-//  logger->set_log_level(quill::LogLevel::Debug);
-//
-//  LOG_INFO(logger, "Starting sms-mi-reg!");
-
   argparse::ArgumentParser program("sms-mi-reg");
   program.add_argument("referenceVolume")
       .help("The volume that is moving to be aligned to the slices.");
@@ -1520,13 +1497,13 @@ int main(int argc, char *argv[])
   itk::TransformFileWriter::Pointer trsfWriter;
   trsfWriter = itk::TransformFileWriter::New();
   trsfWriter->SetInput( finalVRTransform );
-  std::string outFile = "/data/alignTransform_" + outputTransformLabel + ".tfm";
-  trsfWriter->SetFileName(outFile);
+  // std::string outFile = "/data/alignTransform_" + outputTransformLabel + ".tfm";
+  // trsfWriter->SetFileName(outFile);
 
-//  const char* dataDir = std::getenv("DATA_DIR");
-//  std::string baseDir = (dataDir != nullptr) ? dataDir : "/data";
-//  std::string outFile = baseDir + "/alignTransform_" + outputTransformLabel + ".tfm";
-//  trsfWriter->SetFileName(outFile);
+  const char* workdir = std::getenv("WORKDIR");
+  std::filesystem::path outputDir = (workdir && *workdir) ? workdir : "/data";
+  std::filesystem::path outFile = outputDir / ("alignTransform_" + outputTransformLabel + ".tfm");
+  trsfWriter->SetFileName(outFile.string());
 
   try {
     trsfWriter->Update();
