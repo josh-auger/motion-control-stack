@@ -1505,6 +1505,19 @@ int main(int argc, char *argv[])
   std::filesystem::path outFile = outputDir / ("alignTransform_" + outputTransformLabel + ".tfm");
   trsfWriter->SetFileName(outFile.string());
 
+  // std::filesystem::path outputDir;
+  // const char* workdir = std::getenv("WORKDIR");
+  // if (workdir && *workdir && std::filesystem::exists(workdir))
+  // {
+  //     outputDir = workdir;
+  // }
+  // else
+  // {
+  //     outputDir = std::filesystem::current_path();
+  // }
+  // std::filesystem::path outFile = outputDir / ("alignTransform_" + outputTransformLabel + ".tfm");
+  // trsfWriter->SetFileName(outFile.string());
+
   try {
     trsfWriter->Update();
   }
