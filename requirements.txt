@@ -1,14 +1,14 @@
 SimpleITK
 
 # Core numerics
-numpy==1.26.0
+numpy
 scipy
 
 # Medical imaging
 nibabel
 pydicom==2.4.3
 pynetdicom==2.0.2
-h5py==3.10.0
+h5py>=3.11
 ismrmrd==1.14.0
 
 # Data and plotting
