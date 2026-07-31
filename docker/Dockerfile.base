@@ -1,68 +1,81 @@
-FROM python:3.10.2-slim
+ARG CUDA_VERSION=13.2.0
+ARG UBUNTU_VERSION=24.04
 
-# Locale
-RUN apt-get update && apt-get install -y locales locales-all && rm -rf /var/lib/apt/lists/*
+# ---------- shared setup, parameterized by target ----------
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build-base
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get install -y locales locales-all && \
+    rm -rf /var/lib/apt/lists/*
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 ENV LANGUAGE=en_US.UTF-8
-
 ENV MPLCONFIGDIR=/tmp/matplotlibdir
 
-# Shared system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    git \
-    wget \
-    curl \
-#    vim \
-#    nano \
-    unzip \
-    zip \
-    perl \
-    bison \
-    flex \
-    gperf \
+# Python 3.10.2 via deadsnakes (Ubuntu 24.04 ships 3.12 by default)
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python3.10 python3.10-dev python3.10-venv python3.10-distutils && \
+    rm -rf /var/lib/apt/lists/*
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+
+# Shared system deps (your existing list — verify package names against Ubuntu 24.04 repos,
+# a few Debian-slim names may differ, e.g. libtiff5 -> libtiff6 on 24.04)
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
+    build-essential cmake git wget curl unzip zip perl bison flex gperf \
+    ca-certificates gnupg2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Runtime + scientific libs
-RUN apt-get update && apt-get install -y \
-    libgl1 \
-    libglib2.0-0 \
-    libhdf5-103 \
-    libxml2 \
-    libxslt1.1 \
-    libjpeg62-turbo \
-    libpng16-16 \
-    libtiff5 \
-    libsqlite3-0 \
-    zlib1g \
-    liblzma5 \
-    libgomp1 \
-    libfreetype6 \
-    libfontconfig1 \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
+    libgl1 libglib2.0-0 libhdf5-103-1 libxml2 libxslt1.1 \
+    libjpeg62-turbo libpng16-16 libtiff6 libsqlite3-0 zlib1g \
+    liblzma5 libgomp1 libfreetype6 libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Build / C++ dependency libs (shared across containers)
-RUN apt-get update && apt-get install -y \
-    libhdf5-dev \
-    libxml2-dev \
-    libxslt1-dev \
-    libboost-all-dev \
-    libfftw3-dev \
-    libpugixml-dev \
-    libatlas-base-dev \
-    libeigen3-dev \
-    libsuitesparse-dev \
-    libgoogle-glog-dev \
-    libgflags-dev \
-    libproj-dev \
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
+    libhdf5-dev libxml2-dev libxslt1-dev libboost-all-dev libfftw3-dev \
+    libpugixml-dev libatlas-base-dev libeigen3-dev libsuitesparse-dev \
+    libgoogle-glog-dev libgflags-dev libproj-dev \
+    libceres-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Python dependencies (merged)
-COPY ../requirements.txt /tmp/requirements.txt
+COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /tmp/requirements.txt
 
-# default working dir
+WORKDIR /app
+
+# ---------- lean runtime variant ----------
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime-base
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get install -y locales locales-all software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python3.10 python3.10-venv && \
+    rm -rf /var/lib/apt/lists/*
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV LANGUAGE=en_US.UTF-8
+ENV MPLCONFIGDIR=/tmp/matplotlibdir
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Only the runtime-necessary shared libs (no -dev packages, no build-essential/cmake)
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
+    libgl1 libglib2.0-0 libhdf5-103-1 libxml2 libxslt1.1 \
+    libjpeg62-turbo libpng16-16 libtiff6 libsqlite3-0 zlib1g \
+    liblzma5 libgomp1 libfreetype6 libfontconfig1 libceres3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /tmp/requirements.txt
+
 WORKDIR /app
