@@ -12,7 +12,7 @@
 # User-defined Configuration Parameters
 # =====================================
 # Local host directory for output files
-HOST_DATA_DIR=$(pwd)"/data"
+HOST_DATA_DIR="$(pwd)/data"
 
 # Working directory inside container for output files (Docker uses /data, MARS chroot uses /tmp/share
 WORKDIR="/data"
@@ -42,11 +42,12 @@ STREAM_FLAG="off"
 
 # Docker Run Command
 # =====================================
+# set -x
 docker run --rm -it \
   -u $(id -u):$(id -g) \
   -p 9002:9002 \
   -p 8080:8080 \
-  -v $HOST_DATA_DIR:"$WORKDIR" \
+  -v "$HOST_DATA_DIR:$WORKDIR" \
   -e WORKDIR="$WORKDIR" \
   -e MOCO_FLAG="$MOCO_FLAG" \
   -e FIFO_FLAG="$FIFO_FLAG" \
