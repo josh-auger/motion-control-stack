@@ -55,4 +55,4 @@ docker run --rm -it \
   -e HEAD_RADIUS="$HEAD_RADIUS" \
   -e MOTION_THRESH="$MOTION_THRESH" \
   -e STREAM_FLAG="$STREAM_FLAG" \
-  jauger/motion-control-stack:dev all
+  jauger/motion-control-stack:cuda all
