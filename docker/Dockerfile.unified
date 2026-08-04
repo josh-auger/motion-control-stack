@@ -70,6 +70,79 @@ RUN cd /usr/src && \
     make -j${THREADS} && make install
 
 
+# CUDA samples (provides helper_math.h)
+# ============================================================
+RUN git clone --depth 1 \
+    https://github.com/NVIDIA/cuda-samples.git \
+    /opt/cuda-samples
+
+# CUDA samples helper_math.h compatibility
+# ============================================================
+RUN mkdir -p /usr/local/cuda/samples/common/inc && \
+    ln -s /opt/cuda-samples/Common/helper_math.h \
+    /usr/local/cuda/samples/common/inc/helper_math.h
+
+# SimpleITK library for SLIMM
+# ============================================================
+RUN mkdir -p /opt/simpleitk && \
+    cd /opt/simpleitk && \
+    git clone --depth 1 \
+    --branch v2.5.5 \
+    https://github.com/SimpleITK/SimpleITK.git
+
+RUN mkdir -p /opt/simpleitk/build && \
+    cd /opt/simpleitk/build && \
+    cmake ../SimpleITK/SuperBuild \
+          -DBUILD_TESTING=OFF && \
+    make -j${THREADS}
+
+ENV SimpleITK_DIR=/opt/simpleitk/build/SimpleITK-build
+
+
+# STAGE 3a: SLIMM CUDA STANDALONE REGISTRATION
+# ============================================================
+RUN apt-get update && apt-get install -y \
+    libceres-dev \
+    libgoogle-glog-dev \
+    libgflags-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/
+
+# ACE library
+RUN mkdir -p /opt/ace-src && cd /opt/ace-src && \
+    curl -L -O https://github.com/DOCGroup/ACE_TAO/releases/download/ACE%2BTAO-8_0_6/ACE-8.0.6.tar.gz && \
+    tar zxf ACE-8.0.6.tar.gz
+
+ENV ACE_ROOT=/opt/ace-src/ACE_wrappers
+ENV ACE_INSTALL_DIR=/opt/ace
+
+RUN cd ${ACE_ROOT}/ace && cp config-linux.h config.h
+
+RUN cd ${ACE_ROOT} && \
+    cp include/makeinclude/platform_linux.GNU \
+       include/makeinclude/platform_macros.GNU
+
+RUN cd ${ACE_ROOT} && \
+    echo "INSTALL_PREFIX=/opt/ace" >> include/makeinclude/platform_macros.GNU
+
+RUN cd ${ACE_ROOT}/ace && \
+    make -j${THREADS} && \
+    make install
+
+# Compile standalone SLIMM-v3 executable
+COPY external/SLIMM-v3 /opt/code/SLIMM-v3
+
+RUN mkdir -p /opt/code/SLIMM-v3/build && \
+    cd /opt/code/SLIMM-v3/build && \
+    cmake ../src/registration \
+        -DSimpleITK_DIR=${SimpleITK_DIR} \
+        -DITK_DIR=${ITK_DIR} && \
+    make -j${THREADS}
+
+RUN cp /opt/code/SLIMM-v3/build/cuda-standalone-registration \
+       /opt/moco/bin/
+
+
 # STAGE 3: COMPILE SMS-MI-REG
 # ============================================================
 RUN mkdir -p /usr/src/moco
