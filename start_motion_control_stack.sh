@@ -21,7 +21,7 @@ WORKDIR="/data"
 MOCO_FLAG="off"
 
 # Registration engine determines the backend used for image registration ("sms-mi-reg", "cuda")
-REG_ENGINE="sms-mi-reg"
+REG_ENGINE="cuda"
 
 # Registration type determines the grouping of image data (by "slice", "smsgroup", or "volume") 
 REG_TYPE="smsgroup"
@@ -37,10 +37,6 @@ MOTION_THRESH=0.3
 
 # Toggle web streaming in motion-monitor ("on", "off")
 STREAM_FLAG="off"
-
-# JDA: When queue-processor switches to SLIMM CUDA SVR, add `--gpus all` to the Docker command below.
-# JDA: The host must have NVIDIA drivers and NVIDIA Container Toolkit installed; make this configurable if
-# JDA: CPU-only deployments must continue to use the existing sms-mi-reg registration path.
 
 
 # Docker Run Command

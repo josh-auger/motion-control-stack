@@ -183,16 +183,43 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
     elif REG_ENGINE == "cuda":
         logging.info("CUDA registration backend selected.")
 
-        # TO-DO:
-        # Replace sms-mi-reg subprocess with cuda-standalone-registration
-        # Required:
-        # 1. Convert inputTransform_filepath (.tfm) to Euler paramaters for --init argument
-        # 2. Call cuda-standalone-registration with input args
-        # 3. Write compatible alignTransform_<outputTransformLabel>.tfm output
+        init_params_string = extract_cuda_initialization(inputTransform_filepath)
+        logging.info(f"CUDA initialization parameters : {init_params_string}")
 
-        raise RuntimeError(
-            "CUDA registration backend not yet implemented. Use sms-mi-reg for now."
-        )
+        run_command = [
+            "/opt/moco/bin/cuda-standalone-registration",
+            reference_volume_filepath,
+            outputTransformLabel,
+            "--init",
+            init_params_string,
+        ] + target_filepaths
+
+        logging.info(f"CUDA registration run command : {run_command}")
+
+        start_time = time.time()
+        try:
+            registration_process = subprocess.run(
+                run_command,
+                shell=False,
+                text=True,
+                capture_output=True,
+                check=True
+            )
+
+            end_time = time.time()
+            run_time = end_time - start_time
+
+            logging.info(
+                registration_process.stdout.replace('\n', '\n\t')
+            )
+            logging.info(
+                f"CUDA registration call elapsed runtime (sec) : {run_time:.10f}"
+            )
+        except subprocess.CalledProcessError as e:
+            logging.error(
+                f"CUDA registration FAILED:\n{e.stderr}"
+            )
+            return None
 
 
 def compose_transform_pair(transform1, transform2):
@@ -319,6 +346,26 @@ def read_slice_timings_from_json(json_filepath):
     logging.info(f"Extracted slice timings (ordered by index): {slice_timing}")
     logging.info(f"Slice acquisition order (ascending time): {sorted_indices}")
     return slice_timing
+
+
+def extract_cuda_initialization(transform_filepath):
+    """
+    Convert SimpleITK rigid transform file (.tfm) into CUDA CLI parameters for --init argument.
+    Format: "rx ry rz tx ty tz" where rx, ry, rz are rotations (radians) and tx, ty, tz are translations (mm)
+    """
+    transform = sitk.ReadTransform(transform_filepath)
+    euler_transform = convert_versor_to_euler(transform)
+    params = euler_transform.GetParameters()  # (rx, ry, rz, tx, ty, tz)
+    init_string = " ".join(
+        f"{p:.6f}"
+        for p in params
+    )
+
+    logging.info(
+        f"Extracted CUDA initialization parameters from {transform_filepath} : {init_string}"
+    )
+
+    return init_string
 
 
 def monitor_directory(input_dir, fifo_flag, reg_engine):

@@ -42,8 +42,8 @@ log "========================================"
 # ============================================================
 if [ "$MODE" = "all" ]; then
   MOCO_FLAG="${MOCO_FLAG:-off}"
-  REG_ENGINE="${REG_ENGINE:-cuda}"
   REG_TYPE="${REG_TYPE:-smsgroup}"
+  REG_ENGINE="${REG_ENGINE:-sms-mi-reg}"
   FIFO_FLAG="${FIFO_FLAG:-on}"
   HEAD_RADIUS="${HEAD_RADIUS:-50}"
   MOTION_THRESH="${MOTION_THRESH:-0.3}"
@@ -52,8 +52,8 @@ if [ "$MODE" = "all" ]; then
   log "Starting ALL services..."
   log "  WORKDIR=$WORKDIR"
   log "  MOCO_FLAG=$MOCO_FLAG"
-  log "  REG_ENGINE=$REG_ENGINE"
   log "  REG_TYPE=$REG_TYPE"
+  log "  REG_ENGINE=$REG_ENGINE"
   log "  FIFO_FLAG=$FIFO_FLAG"
   log "  HEAD_RADIUS=$HEAD_RADIUS"
   log "  MOTION_THRESH=$MOTION_THRESH"
@@ -165,6 +165,7 @@ elif [ "$MODE" = "fire-server" ]; then
 
 # QUEUE PROCESSOR
 elif [ "$MODE" = "queue-processor" ]; then
+  REG_ENGINE="${REG_ENGINE:-sms-mi-reg}"
   FIFO_FLAG="${FIFO_FLAG:-on}"
   log "Starting queue-processor"
   log "  WORKDIR=$WORKDIR"
