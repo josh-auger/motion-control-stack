@@ -20,6 +20,9 @@ WORKDIR="/data"
 # Toggle sending moco feedback to the scanner for prospective motion correction ("on", "off")
 MOCO_FLAG="off"
 
+# Registration engine determines the backend used for image registration ("sms-mi-reg", "cuda")
+REG_ENGINE="sms-mi-reg"
+
 # Registration type determines the grouping of image data (by "slice", "smsgroup", or "volume") 
 REG_TYPE="smsgroup"
 
@@ -51,6 +54,7 @@ docker run --rm -it \
   -e WORKDIR="$WORKDIR" \
   -e MOCO_FLAG="$MOCO_FLAG" \
   -e FIFO_FLAG="$FIFO_FLAG" \
+  -e REG_ENGINE="$REG_ENGINE" \
   -e REG_TYPE="$REG_TYPE" \
   -e HEAD_RADIUS="$HEAD_RADIUS" \
   -e MOTION_THRESH="$MOTION_THRESH" \

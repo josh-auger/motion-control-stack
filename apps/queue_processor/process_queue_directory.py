@@ -119,11 +119,16 @@ def select_input_transform(input_dir, identityTransform_filepath, counter, refer
     return chosen_transform
 
 
-def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransform_filepath, outputTransformLabel):
+def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransform_filepath, outputTransformLabel, reg_engine):
     """
     Compile all inputs for the sub-process run command to execute registration between the assigned reference volume and
     the specified target image slice(s).
     """
+
+    # Temporary registratiion backend selector for CUDA validation
+    # Replace with REG_ENGINE environment variable after validation
+    REG_ENGINE = reg_engine  # Options: "sms-mi-reg", "cuda"
+
     # Ensure target_volume_filepaths is a list
     if isinstance(target_filepaths, str):
         target_filepaths = [target_filepaths]
@@ -137,38 +142,57 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
             logging.info(f"Registration FAILED. {label} file not found : {fpath}")
             return None
 
-    # JDA: Replace this sms-mi-reg command with /opt/slimm/bin/cuda-standalone-registration.
-    # JDA: Its argument order is <reference-volume> [--init "rx ry rz tx ty tz"] <target-slice>...;
-    # JDA: preserve every target in this pointer group so SMS groups remain one shared SVR optimization.
-    # JDA: Before switching, extend main-stand-alone.cu to accept an explicit output path and atomically
-    # JDA: write alignTransform_<registration-index>.tfm rather than only printing parameters to stdout.
-    # JDA: The written transform must be validated against the current sms-mi-reg fixed-to-moving convention,
-    # JDA: SimpleITK transform type/center, and coordinate-frame expectations used by motion-monitor and FIRE MoCo.
-    # Call sms-mi-reg executable with local filepath inputs
-    optimizer = "LN_SBPLX"
-    maxiterations = "1000"
-    run_command = [
-                      "/opt/moco/bin/sms-mi-reg",
-                      reference_volume_filepath,
-                      inputTransform_filepath,
-                      outputTransformLabel
-                  ] + target_filepaths + [
-                      "--optimizer", optimizer,
-                      "--maxiter", maxiterations
-                  ]
+    if REG_ENGINE == "sms-mi-reg":
+        optimizer = "LN_SBPLX"
+        maxiterations = "1000"
+        run_command = [
+                        "/opt/moco/bin/sms-mi-reg",
+                        reference_volume_filepath,
+                        inputTransform_filepath,
+                        outputTransformLabel
+                    ] + target_filepaths + [
+                        "--optimizer", optimizer,
+                        "--maxiter", maxiterations
+                    ]
 
-    logging.info(f"Registration run command : {run_command}")
-    start_time = time.time()
-    try:
-        registration_process = subprocess.run(run_command, shell=False, text=True, capture_output=True, check=True)
-        end_time = time.time()
-        run_time = end_time - start_time
-        logging.info(registration_process.stdout.replace('\n', '\n\t'))
-        logging.info(f"Registration call elapsed runtime (sec) : {run_time:.10f}")
-        return None
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Registration FAILED : {e.stderr}")
-        return None
+        logging.info(f"Registration run command : {run_command}")
+        start_time = time.time()
+        try:
+            registration_process = subprocess.run(
+                run_command, 
+                shell=False, 
+                text=True, 
+                capture_output=True, 
+                check=True
+            )
+
+            end_time = time.time()
+            run_time = end_time - start_time
+            logging.info(
+                registration_process.stdout.replace('\n', '\n\t')
+            )
+            logging.info(
+                f"Registration call elapsed runtime (sec) : {run_time:.10f}"
+            )
+            return None
+        
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Registration FAILED : {e.stderr}")
+            return None
+
+    elif REG_ENGINE == "cuda":
+        logging.info("CUDA registration backend selected.")
+
+        # TO-DO:
+        # Replace sms-mi-reg subprocess with cuda-standalone-registration
+        # Required:
+        # 1. Convert inputTransform_filepath (.tfm) to Euler paramaters for --init argument
+        # 2. Call cuda-standalone-registration with input args
+        # 3. Write compatible alignTransform_<outputTransformLabel>.tfm output
+
+        raise RuntimeError(
+            "CUDA registration backend not yet implemented. Use sms-mi-reg for now."
+        )
 
 
 def compose_transform_pair(transform1, transform2):
@@ -297,7 +321,7 @@ def read_slice_timings_from_json(json_filepath):
     return slice_timing
 
 
-def monitor_directory(input_dir, fifo_flag):
+def monitor_directory(input_dir, fifo_flag, reg_engine):
     """Monitor directory for new image files without deleting any."""
     # Initialization
     # -------------------------------------------
@@ -460,7 +484,7 @@ def monitor_directory(input_dir, fifo_flag):
         # JDA: Carry this registration/volume/group identity into the GPU output filename. Existing consumers
         # JDA: currently discover alignTransform_<regcount>.tfm, so either preserve that exact name or update
         # JDA: maybe_update_reference, fire-server, and motion-monitor together to use the new naming contract.
-        run_MIregistration(state["reference_volume_filepath"], target_paths, input_transform, output_string)
+        run_MIregistration(state["reference_volume_filepath"], target_paths, input_transform, output_string, reg_engine)
 
     def maybe_update_reference(input_dir, pointer_filepath):
         """Check reference volume transform and update if needed."""
@@ -581,13 +605,16 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("input_directory", nargs="?", help="Path to image files")
     parser.add_argument("--fifo", type=str, choices=["on", "off"], help="First-in-first-out processing")
+    parser.add_argument("--regengine", type=str, choices=["sms-mi-reg", "cuda"], help="Registration engine backend")
     args = parser.parse_args()
 
     env_fifo = os.environ.get("FIFO_FLAG", "on")
     fifo_flag = args.fifo if args.fifo is not None else env_fifo
 
+    env_reg_engine = os.environ.get("REG_ENGINE", "sms-mi-reg")
+
     setup_logging(args.input_directory)
-    monitor_directory(args.input_directory, fifo_flag)
+    monitor_directory(args.input_directory, fifo_flag, env_reg_engine)
 
 if __name__ == "__main__":
     main()

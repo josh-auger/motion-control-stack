@@ -42,6 +42,7 @@ log "========================================"
 # ============================================================
 if [ "$MODE" = "all" ]; then
   MOCO_FLAG="${MOCO_FLAG:-off}"
+  REG_ENGINE="${REG_ENGINE:-cuda}"
   REG_TYPE="${REG_TYPE:-smsgroup}"
   FIFO_FLAG="${FIFO_FLAG:-on}"
   HEAD_RADIUS="${HEAD_RADIUS:-50}"
@@ -51,6 +52,7 @@ if [ "$MODE" = "all" ]; then
   log "Starting ALL services..."
   log "  WORKDIR=$WORKDIR"
   log "  MOCO_FLAG=$MOCO_FLAG"
+  log "  REG_ENGINE=$REG_ENGINE"
   log "  REG_TYPE=$REG_TYPE"
   log "  FIFO_FLAG=$FIFO_FLAG"
   log "  HEAD_RADIUS=$HEAD_RADIUS"
@@ -82,6 +84,7 @@ if [ "$MODE" = "all" ]; then
   # JDA: and fail clearly if the container was not launched with an NVIDIA GPU runtime.
   python3 /opt/apps/queue_processor/process_queue_directory.py \
     "$WORKDIR" \
+    --regengine "$REG_ENGINE" \
     --fifo "$FIFO_FLAG" \
     > "$LOGDIR/STDOUT_queue_processor_${TIMESTAMP}.log" 2>&1 &   # redirect stdout/stderr to log file
   QUEUE_PID=$!
@@ -165,12 +168,14 @@ elif [ "$MODE" = "queue-processor" ]; then
   FIFO_FLAG="${FIFO_FLAG:-on}"
   log "Starting queue-processor"
   log "  WORKDIR=$WORKDIR"
+  log "  REG_ENGINE=$REG_ENGINE"
   log "  FIFO_FLAG=$FIFO_FLAG"
   # JDA: Keep this single-service path behavior aligned with `all`: it also needs GPU availability checks
   # JDA: after the registration command is migrated to cuda-standalone-registration.
 
   exec python3 /opt/apps/queue_processor/process_queue_directory.py \
     "$WORKDIR" \
+    --regengine "$REG_ENGINE" \
     --fifo "$FIFO_FLAG"
 
 
