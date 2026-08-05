@@ -47,7 +47,7 @@ RUN mkdir itksrc && cd itksrc && \
           ../ITK && \
     make -j${THREADS} && make install
 
-ENV ITK_DIR=/opt/itk/lib/cmake/ITK-5.4
+# ENV ITK_DIR=/opt/itk/lib/cmake/ITK-5.4
 
 # NLOPT library
 RUN mkdir -p /usr/src/nlopt && cd /usr/src/nlopt && \
@@ -97,6 +97,7 @@ RUN mkdir -p /opt/simpleitk/build && \
     make -j${THREADS}
 
 ENV SimpleITK_DIR=/opt/simpleitk/build/SimpleITK-build
+ENV ITK_DIR=/opt/simpleitk/build/ITK-prefix/lib/cmake/ITK
 
 
 # STAGE 3a: SLIMM CUDA STANDALONE REGISTRATION
@@ -139,9 +140,6 @@ RUN mkdir -p /opt/code/SLIMM-v3/build && \
         -DITK_DIR=${ITK_DIR} && \
     make -j${THREADS}
 
-RUN cp /opt/code/SLIMM-v3/build/cuda-standalone-registration \
-       /opt/moco/bin/
-
 
 # STAGE 3: COMPILE SMS-MI-REG
 # ============================================================
@@ -157,6 +155,10 @@ RUN cd /usr/src/moco && \
     make -j${THREADS} && \
     mkdir -p /opt/moco/bin && \
     cp /usr/src/moco/sms-mi-reg /opt/moco/bin/
+
+# Copy GPU-accelerated SLIMM-v3 registration binary into moco bin directory
+RUN cp /opt/code/SLIMM-v3/build/cuda-standalone-registration \
+       /opt/moco/bin/
 
 ENV MOCO_DIR=/opt/moco/lib/cmake/moco
 
@@ -179,6 +181,7 @@ COPY --from=base /opt/itk /opt/itk
 COPY --from=base /opt/nlopt /opt/nlopt
 COPY --from=base /opt/quill /opt/quill
 COPY --from=base /opt/moco /opt/moco
+COPY --from=base /opt/ace /opt/ace
 
 # APPLICATIONS
 COPY ../apps/python_fire_server     /opt/apps/fire_server
