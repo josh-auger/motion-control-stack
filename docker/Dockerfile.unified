@@ -37,15 +37,16 @@ RUN cd /opt/code && \
 # ============================================================
 WORKDIR /usr/src
 
-# ITK library
-RUN mkdir itksrc && cd itksrc && \
-    git clone --depth 1 -b v5.4.0 https://github.com/InsightSoftwareConsortium/ITK ITK && \
-    mkdir build && cd build && \
-    cmake -DCMAKE_INSTALL_PREFIX=/opt/itk \
-          -DBUILD_TESTING=OFF \
-          -DBUILD_EXAMPLES=OFF \
-          ../ITK && \
-    make -j${THREADS} && make install
+# JDA: Stale ITK build since SimpleITK SuperBuild will also build ITK. Keep suppressed for now until confirmed.
+# # ITK library
+# RUN mkdir itksrc && cd itksrc && \
+#     git clone --depth 1 -b v5.4.0 https://github.com/InsightSoftwareConsortium/ITK ITK && \
+#     mkdir build && cd build && \
+#     cmake -DCMAKE_INSTALL_PREFIX=/opt/itk \
+#           -DBUILD_TESTING=OFF \
+#           -DBUILD_EXAMPLES=OFF \
+#           ../ITK && \
+#     make -j${THREADS} && make install
 
 # ENV ITK_DIR=/opt/itk/lib/cmake/ITK-5.4
 
@@ -167,7 +168,8 @@ ENV MOCO_DIR=/opt/moco/lib/cmake/moco
 FROM shared-base-build:runtime AS runtime
 
 # runtime environment
-ENV LD_LIBRARY_PATH=/opt/itk/lib:/opt/nlopt/lib:/opt/moco/lib:${LD_LIBRARY_PATH}
+# ENV LD_LIBRARY_PATH=/opt/itk/lib:/opt/nlopt/lib:/opt/moco/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/opt/nlopt/lib:/opt/moco/lib:${LD_LIBRARY_PATH}
 ENV PATH=/opt/moco/bin:${PATH}
 
 # ISMRMRD artifacts
@@ -177,7 +179,7 @@ COPY --from=base /usr/local/bin /usr/local/bin/
 COPY --from=base /usr/local/lib /usr/local/lib
 
 # C++ installs
-COPY --from=base /opt/itk /opt/itk
+# COPY --from=base /opt/itk /opt/itk
 COPY --from=base /opt/nlopt /opt/nlopt
 COPY --from=base /opt/quill /opt/quill
 COPY --from=base /opt/moco /opt/moco
