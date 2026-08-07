@@ -132,7 +132,7 @@ RUN cd ${ACE_ROOT}/ace && \
     make install
 
 # Compile standalone SLIMM-v3 executable
-COPY external/SLIMM-v3 /opt/code/SLIMM-v3
+COPY --from=slimm . /opt/code/SLIMM-v3
 
 RUN mkdir -p /opt/code/SLIMM-v3/build && \
     cd /opt/code/SLIMM-v3/build && \
