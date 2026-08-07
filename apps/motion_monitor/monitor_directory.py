@@ -125,6 +125,25 @@ def motion_table_to_dataframe(motion_table):
     return df[column_order]
 
 
+def read_transform_as_euler(transform_filepath):
+    """
+    Read SimpleITK tranform file and return Euler3D transform.
+    Supports both VersorRigid3D input type (sms-mi-reg) and Euler3d intput type (SLIMM-v3 cuda).
+    """
+    transform = sitk.ReadTransform(transform_filepath)
+    transform_type = transform.GetName()
+    logging.info(f"Read {transform_filepath} of type : {transform_type}")
+
+    if transform_type == "VersorRigid3DTransform":
+        logging.info(f"Converting Versor to Euler for displacement calculation.")
+        return convert_versor_to_euler(transform)
+    elif transform_type == "Euler3DTransform":
+        logging.info(f"Using input Euler transform.")
+        return transform
+    else:
+        raise RuntimeError(f"Unsupported transform {transform_filepath} type : {transform_type}")
+
+
 def convert_versor_to_euler(transform):
     """Convert a Versor Rigid 3D transform into an equivalent Euler 3D transform."""
     center = transform.GetCenter()
@@ -344,12 +363,14 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         if not os.path.exists(prior_transform_filepath):
             logging.warning(f"Prior transform file no longer exists : {prior_transform_filepath}")
             return
-        prior_transform = convert_versor_to_euler(sitk.ReadTransform(prior_transform_filepath))
+        
+        prior_transform = read_transform_as_euler(prior_transform_filepath)
 
         if not os.path.exists(current_transform_filepath):
             logging.warning(f"Current transform file no longer exists : {current_transform_filepath}")
             return
-        current_transform = convert_versor_to_euler(sitk.ReadTransform(current_transform_filepath))
+        
+        current_transform = read_transform_as_euler(current_transform_filepath)
 
         combined_transform = compose_transform_pair(prior_transform, current_transform)
         prior_params = prior_transform.GetParameters()
@@ -554,9 +575,6 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
 
                 # Handle transform files
                 if ext == ".tfm":
-                    # JDA: Preserve a SimpleITK-readable rigid .tfm output from GPU SVR, including its center and
-                    # JDA: reference/target convention. Confirm filename parsing and framewise displacement remain
-                    # JDA: correct when one transform represents an SMS slice group rather than a whole volume.
                     get_counters_from_filename(new_filepath)
                     state["itemcount"] += 1
                     if state["itemcount"] == 1:
