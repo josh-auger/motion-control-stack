@@ -7,6 +7,7 @@
 # Build the motion-control-stack container with CUDA support for SLIMM-v3
 docker build \
     --build-context slimm=../SLIMM-v3 \
+    --build-context sms_mi_reg=../sms-mi-reg \
     -t jauger/motion-control-stack:cuda \
     -f ./docker/Dockerfile.unified \
     .

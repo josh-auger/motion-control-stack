@@ -145,7 +145,7 @@ RUN mkdir -p /opt/code/SLIMM-v3/build && \
 # STAGE 3: COMPILE SMS-MI-REG
 # ============================================================
 RUN mkdir -p /usr/src/moco
-COPY ../external/sms-mi-reg-jauger /usr/src/moco
+COPY --from=sms_mi_reg . /usr/src/moco
 
 ENV PATH="/usr/src/moco:${PATH}"
 
