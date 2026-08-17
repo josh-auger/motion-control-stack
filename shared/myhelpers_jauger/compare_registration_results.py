@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare static-phantom sms-mi-reg and SLIMM-v3 CUDA result directories.
+"""Compare sms-mi-reg and SLIMM-v3 CUDA registration result directories.
 
 The transform files are authoritative.  VersorRigid3D and Euler3D transforms
 are reduced to rotation matrices and physical homogeneous transforms before
@@ -581,7 +581,7 @@ th:first-child,td:first-child {{ text-align:left; }} tbody tr:nth-child(even) {{
 figure {{ margin:0; padding:.75rem; border:1px solid var(--line); box-shadow:0 1px 3px #0001; }} figure img {{ display:block; width:100%; max-width:100%; height:auto; }}
 figcaption {{ margin-top:.6rem; color:var(--muted); font-size:.92rem; }} footer {{ margin-top:3rem; padding-top:1rem; border-top:1px solid var(--line); color:var(--muted); }}
 </style></head><body><main>
-<header><h1>Registration Comparison Summary</h1><p class="summary">Static-phantom comparison of sms-mi-reg and SLIMM-v3 CUDA using physical rigid transforms, motion-monitor output, and queue runtime logs. Lower FD is treated as a stability/noise-floor observation, not proof of greater accuracy.</p></header>
+<header><h1>Registration Comparison Summary</h1><p class="summary">Comparison of sms-mi-reg and SLIMM-v3 CUDA using physical rigid transforms, motion-monitor output, and queue runtime logs. Motion and registration metrics are reported descriptively without attributing threshold exceedances to a specific cause. Lower FD alone does not prove greater registration accuracy.</p></header>
 
 <section><h2>1. Input Datasets</h2><ul><li><strong>sms-mi-reg:</strong> <code>{html.escape(str(sms_inv.root))}</code></li>
 <li><strong>SLIMM-v3 CUDA:</strong> <code>{html.escape(str(cuda_inv.root))}</code></li><li>Head radius: {radius:g} mm; motion threshold: {threshold:g} mm.</li></ul></section>
@@ -594,7 +594,7 @@ figcaption {{ margin-top:.6rem; color:var(--muted); font-size:.92rem; }} footer 
 <h3>Transform representation</h3><p>sms-mi-reg registrations are <code>VersorRigid3DTransform</code>; CUDA registrations are <code>Euler3DTransform</code> (the common identity reference is Versor). SimpleITK normalized both to rotation matrices and <code>x′ = R(x−c)+c+t</code>. Pairwise disagreement used <code>inverse(T_sms) @ T_cuda</code>; raw rotation parameter vectors were not compared.</p>
 <p>Maximum corresponding center difference was {fmt(max_center)} mm. Relative translation measures displacement at the shared mean center.</p></section>
 
-<section><h2>3. Static-Phantom Motion and Noise-Floor Comparison</h2>{noise_table}
+<section><h2>3. Motion and Transform Magnitude Comparison</h2>{noise_table}
 <p>Axis translation means ± SD (mm): sms-mi-reg = ({fmt(sms_noise['tx']['mean'])} ± {fmt(sms_noise['tx']['sd'])}, {fmt(sms_noise['ty']['mean'])} ± {fmt(sms_noise['ty']['sd'])}, {fmt(sms_noise['tz']['mean'])} ± {fmt(sms_noise['tz']['sd'])}); CUDA = ({fmt(cuda_noise['tx']['mean'])} ± {fmt(cuda_noise['tx']['sd'])}, {fmt(cuda_noise['ty']['mean'])} ± {fmt(cuda_noise['ty']['sd'])}, {fmt(cuda_noise['tz']['mean'])} ± {fmt(cuda_noise['tz']['sd'])}).</p>
 {figure_group([('translation_traces.png','Figure 1. X, Y, and Z translation traces for both backends.'),('rotation_magnitude_trace.png','Figure 2. Equivalent physical rotation magnitude over acquisition order.'),('translation_magnitude_distribution.png','Figure 3. Absolute translation-magnitude distributions.'),('rotation_distribution.png','Figure 4. Equivalent rotation-magnitude distributions.')])}
 <h3>Drift and volume-to-volume stability</h3>{drift_table}<p>Ranges across per-volume means (sms-mi-reg / CUDA): translation {fmt(sms_noise['volume_mean_ranges'].get('translation_mm'))} / {fmt(cuda_noise['volume_mean_ranges'].get('translation_mm'))} mm; rotation {fmt(sms_noise['volume_mean_ranges'].get('rotation_deg'))} / {fmt(cuda_noise['volume_mean_ranges'].get('rotation_deg'))}°; FD {fmt(sms_noise['volume_mean_ranges'].get('fd'))} / {fmt(cuda_noise['volume_mean_ranges'].get('fd'))} mm. Tiny slopes should not be over-interpreted.</p></section>
@@ -603,10 +603,13 @@ figcaption {{ margin-top:.6rem; color:var(--muted); font-size:.92rem; }} footer 
 <li>Relative rotation: mean {fmt(pair_r['mean'])}°, median {fmt(pair_r['median'])}°, SD {fmt(pair_r['sd'])}°, maximum {fmt(pair_r['max'])}°.</li><li>Relative {radius:g}-mm displacement proxy: mean {fmt(pair_d['mean'])} mm, maximum {fmt(pair_d['max'])} mm.</li></ul><p>These values measure backend agreement, not ground-truth accuracy.</p>
 {figure_group([('pairwise_transform_disagreement.png','Figure 5. Center-aware relative translation and rotation for all matched pairs.')])}</section>
 
-<section><h2>5. Framewise Displacement</h2><p>Mean FD was {fmt(sms_noise['fd']['mean'])} mm for sms-mi-reg and {fmt(cuda_noise['fd']['mean'])} mm for CUDA. Neither run exceeded {threshold:g} mm. FD is the project motion monitor's sequential transform-to-transform metric.</p>
+<section><h2>5. Framewise Displacement Comparison</h2><p>The configured FD threshold is {threshold:g} mm. FD is the project motion monitor's sequential transform-to-transform metric; threshold exceedances are reported descriptively and are not assigned to true motion or registration error.</p>
+<ul><li><strong>sms-mi-reg:</strong> {sms_noise['fd_above']} / {int(sms_noise['fd']['count'])} registrations ({fmt(sms_noise['fd_above_pct'], 4)}%) exceeded {threshold:g} mm.</li>
+<li><strong>CUDA:</strong> {cuda_noise['fd_above']} / {int(cuda_noise['fd']['count'])} registrations ({fmt(cuda_noise['fd_above_pct'], 4)}%) exceeded {threshold:g} mm.</li></ul>
+<p>Mean FD was {fmt(sms_noise['fd']['mean'])} mm for sms-mi-reg and {fmt(cuda_noise['fd']['mean'])} mm for CUDA.</p>
 {figure_group([('framewise_displacement_trace.png',f'Figure 6. Framewise displacement with the {threshold:g} mm threshold.'),('fd_distribution.png','Figure 7. Framewise-displacement distributions.')])}</section>
 
-<section><h2>6. Slice-Group Stability / Bias</h2><p>Per-group means are shown; the CSV also contains SDs.</p>{group_table}<p>Group structure is suitable for review but is not itself evidence of phantom motion.</p>
+<section><h2>6. Slice-Group Stability / Bias</h2><p>Per-group means are shown; the CSV also contains SDs.</p>{group_table}<p>Group structure is reported descriptively and does not by itself establish the source of observed displacement.</p>
 {figure_group([('slice_group_bias.png','Figure 8. Mean translation, rotation, and FD by SMS slice-group index.')])}</section>
 
 <section><h2>7. Optimization and Runtime Performance</h2>{runtime_table}<ul><li>Optimizer speedup: <strong>{fmt(optimizer_speedup)}×</strong>.</li><li>Registration-call speedup: <strong>{fmt(call_speedup)}×</strong>.</li>
@@ -614,7 +617,7 @@ figcaption {{ margin-top:.6rem; color:var(--muted); font-size:.92rem; }} footer 
 {figure_group([('runtime_comparison.png','Figure 9. Optimizer and end-to-end registration-call runtime distributions.'),('cost_evaluations_comparison.png','Figure 10. Optimizer cost-evaluation counts.')])}
 <h3>Objective values</h3><ul><li>sms-mi-reg: mean {fmt(runtime.loc[('sms-mi-reg','objective'),'mean'])}, SD {fmt(runtime.loc[('sms-mi-reg','objective'),'sd'])}, min {fmt(runtime.loc[('sms-mi-reg','objective'),'min'])}, max {fmt(runtime.loc[('sms-mi-reg','objective'),'max'])}.</li><li>CUDA: mean {fmt(runtime.loc[('CUDA','objective'),'mean'])}, SD {fmt(runtime.loc[('CUDA','objective'),'sd'])}, min {fmt(runtime.loc[('CUDA','objective'),'min'])}, max {fmt(runtime.loc[('CUDA','objective'),'max'])}.</li></ul><p class="note">Cross-backend objective magnitudes are not comparable because MI formulations, signs, and scales differ.</p></section>
 
-<section><h2>8. Key Conclusions</h2><ul><li>Both runs remained below {threshold:g} mm for all 126 registrations; mean FD was {fmt(sms_noise['fd']['mean'])} / {fmt(cuda_noise['fd']['mean'])} mm (sms-mi-reg / CUDA).</li>
+<section><h2>8. Key Conclusions</h2><ul><li>At the {threshold:g} mm FD threshold, sms-mi-reg had {sms_noise['fd_above']} / {int(sms_noise['fd']['count'])} registrations ({fmt(sms_noise['fd_above_pct'], 4)}%) above threshold and CUDA had {cuda_noise['fd_above']} / {int(cuda_noise['fd']['count'])} ({fmt(cuda_noise['fd_above_pct'], 4)}%) above threshold. These counts are descriptive and do not distinguish motion from registration error.</li>
 <li>Mean translation was {fmt(sms_noise['translation_mm']['mean'])} / {fmt(cuda_noise['translation_mm']['mean'])} mm and mean rotation was {fmt(sms_noise['rotation_deg']['mean'])} / {fmt(cuda_noise['rotation_deg']['mean'])}°.</li>
 <li>Mean physical disagreement was {fmt(pair_t['mean'])} mm and {fmt(pair_r['mean'])}°; maxima were {fmt(pair_t['max'])} mm and {fmt(pair_r['max'])}°.</li>
 <li>Per-group mean FD ranged {fmt(groups.loc[groups.backend == 'sms-mi-reg','fd_mean'].min())}–{fmt(groups.loc[groups.backend == 'sms-mi-reg','fd_mean'].max())} mm for sms-mi-reg and {fmt(groups.loc[groups.backend == 'CUDA','fd_mean'].min())}–{fmt(groups.loc[groups.backend == 'CUDA','fd_mean'].max())} mm for CUDA.</li>
@@ -629,7 +632,7 @@ figcaption {{ margin-top:.6rem; color:var(--muted); font-size:.92rem; }} footer 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare static-phantom sms-mi-reg and SLIMM-v3 CUDA registration results using physical rigid transforms, motion-monitor data, and queue runtimes.",
+        description="Compare sms-mi-reg and SLIMM-v3 CUDA registration results using physical rigid transforms, motion-monitor data, and queue runtimes.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("sms_results_dir", type=Path, help="Completed sms-mi-reg result directory")
