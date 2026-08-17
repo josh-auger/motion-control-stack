@@ -495,6 +495,7 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
         # JDA: dimensions, spacing, direction, and z-origin to be compatible with this reference volume.
         # Upsample first image volume and set to be reference volume for registrations
         state["reference_volume_filepath"] = resample_nrrd_volume(target_paths[0], upsample_factor=0.51)
+        # state["reference_volume_filepath"] = target_paths[0]  # JDA: Use original volume as reference. Upsampling disabled for GPU validation.
         # state["reference_volume_filepath"] = target_paths[0]
         logging.info(f"Provisional reference volume set to : {state['reference_volume_filepath']}")
 
