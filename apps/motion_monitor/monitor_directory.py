@@ -412,23 +412,9 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
 
     def plot_motion_data(input_dir):
         motion_df = motion_table_to_dataframe(state["motion_table"])
-        # timestamp = time.strftime("%Y%m%d_%H%M%S")
-        # parameters_filepath = os.path.join(input_dir, f"motionMonitor_parameters_{state['protocol_name']}.jpg")
-        # displacements_filepath = os.path.join(input_dir, f"motionMonitor_framewise_displacement_{state['protocol_name']}.jpg")
         dashboard_filepath = os.path.join(input_dir, f"motionMonitor_dashboard_{state['protocol_name']}.jpg")
         tmp_dashboard_filepath = os.path.join(input_dir, f".motionMonitor_dashboard_{state['protocol_name']}.tmp.jpg")
         if not motion_df.empty:
-            # plot_parameters_combined(
-            #     motion_df,
-            #     output_filename=parameters_filepath,
-            #     protocol_name=state['protocol_name'])
-            # plot_displacements(
-            #     motion_df,
-            #     output_filename=displacements_filepath,
-            #     protocol_name=state['protocol_name'],
-            #     threshold=motion_threshold,
-            #     num_expected_volumes=state['total_repetitions'],
-            #     num_moved_volumes=state['volume_motion_count'])
             try:
                 if os.path.exists(tmp_dashboard_filepath):
                     os.remove(tmp_dashboard_filepath)

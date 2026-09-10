@@ -48,6 +48,7 @@ if [ "$MODE" = "all" ]; then
   HEAD_RADIUS="${HEAD_RADIUS:-50}"
   MOTION_THRESH="${MOTION_THRESH:-0.3}"
   STREAM_FLAG="${STREAM_FLAG:-off}"
+  SEND_DASHBOARD_FLAG="${SEND_DASHBOARD_FLAG:-off}"
   
   log "Starting ALL services..."
   log "  WORKDIR=$WORKDIR"
@@ -58,6 +59,7 @@ if [ "$MODE" = "all" ]; then
   log "  HEAD_RADIUS=$HEAD_RADIUS"
   log "  MOTION_THRESH=$MOTION_THRESH"
   log "  STREAM_FLAG=$STREAM_FLAG"
+  log "  SEND_DASHBOARD_FLAG=$SEND_DASHBOARD_FLAG"
 
   # ---- Start services in background ----
   log "Launching fire-server..."
@@ -67,6 +69,7 @@ if [ "$MODE" = "all" ]; then
     -p=9002 \
     -S "$WORKDIR" \
     --moco="$MOCO_FLAG" \
+    --send-dashboard "$SEND_DASHBOARD_FLAG" \
     --regtype="$REG_TYPE" \
     > "$LOGDIR/STDOUT_fire_server_${TIMESTAMP}.log" 2>&1 &   # redirect stdout/stderr to log file
   FIRE_PID=$!
@@ -149,10 +152,12 @@ if [ "$MODE" = "all" ]; then
 elif [ "$MODE" = "fire-server" ]; then
   MOCO_FLAG="${MOCO_FLAG:-off}"
   REG_TYPE="${REG_TYPE:-smsgroup}"
+  SEND_DASHBOARD_FLAG="${SEND_DASHBOARD_FLAG:-off}"
   log "Starting fire-server"
   log "  WORKDIR=$WORKDIR"
   log "  MOCO_FLAG=$MOCO_FLAG"
   log "  REG_TYPE=$REG_TYPE"
+  log "  SEND_DASHBOARD_FLAG=$SEND_DASHBOARD_FLAG"
 
   exec python3 /opt/apps/fire_server/main.py \
     -v \
@@ -160,6 +165,7 @@ elif [ "$MODE" = "fire-server" ]; then
     -p=9002 \
     -S "$WORKDIR" \
     --moco="$MOCO_FLAG" \
+    --send-dashboard "$SEND_DASHBOARD_FLAG" \
     --regtype="$REG_TYPE"
 
 

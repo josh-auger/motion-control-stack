@@ -38,6 +38,9 @@ MOTION_THRESH=0.3
 # Toggle web streaming in motion-monitor ("on", "off")
 STREAM_FLAG="off"
 
+# Toggle sending motion report back to scanner in-line display ("on", "off")
+SEND_DASHBOARD_FLAG="on"
+
 
 # Docker Run Command
 # =====================================
@@ -55,5 +58,6 @@ docker run --rm -it \
   -e HEAD_RADIUS="$HEAD_RADIUS" \
   -e MOTION_THRESH="$MOTION_THRESH" \
   -e STREAM_FLAG="$STREAM_FLAG" \
+  -e SEND_DASHBOARD_FLAG="$SEND_DASHBOARD_FLAG" \
   --gpus all \
   jauger/motion-control-stack:cuda all

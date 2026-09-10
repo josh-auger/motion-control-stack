@@ -8,6 +8,8 @@
 # Created by: Joshua Auger (joshua.auger@childrens.harvard.edu), Computational Radiology Lab, Boston Children's Hospital
 
 import ismrmrd
+import copy
+import cv2
 import os
 import itertools
 import logging
@@ -33,7 +35,8 @@ from math import floor
 
 class handleData:
     # Initiate an iterator to read each item in the connection
-    def __init__(self, connection, datafolder, moco_enabled=False, registration_type=None):
+    def __init__(self, connection, datafolder, moco_enabled=False, registration_type=None,
+                 send_dashboard_enabled=False):
         self.connection = connection
         self.is_exhausted = self.connection.is_exhausted
         self.datafolder = datafolder
@@ -47,10 +50,16 @@ class handleData:
         self.frameNumberLookup = []
         self.protocol_name = f"protocol_name"
         self.moco_enabled = moco_enabled
+        self.send_dashboard_enabled = send_dashboard_enabled
         self.registration_type = registration_type
+        self.latest_image_header = None
 
-        # Log moco state
-        logging.info(f"handleData initialized (moco={'ON' if self.moco_enabled else 'OFF'})")
+        # Log output states
+        logging.info(
+            "handleData initialized (moco=%s, dashboard=%s)",
+            "ON" if self.moco_enabled else "OFF",
+            "ON" if self.send_dashboard_enabled else "OFF"
+        )
 
         try:
             now = datetime.now()
@@ -75,16 +84,16 @@ class handleData:
                 logging.info("\tThe connection will be closed since no data has been received.")
                 logging.info(f"\tReceive elapsed time (sec) : {time.time() - start_time}")
 
-                try:
-                    logging.info(f"")
-                    time.sleep(2)   # sympathetic pause to let queue processor catch up
-                    new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into a date-time stamped subdirectory
-                    self.generate_close_file("closeQ")  # generate dummy close file to pass to local-queue-processor container
-                    self.generate_close_file("closeM")  # generate dummy close file to pass to motion-monitor container
-                    time.sleep(3)
-                    self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Another consolidation sweep of final output files
-                except Exception as e:
-                    logging.exception("Error consolidating output files into subdirectory.")
+                # try:
+                #     logging.info(f"")
+                #     time.sleep(2)   # sympathetic pause to let queue processor catch up
+                #     new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into a date-time stamped subdirectory
+                #     self.generate_close_file("closeQ")  # generate dummy close file to pass to local-queue-processor container
+                #     self.generate_close_file("closeM")  # generate dummy close file to pass to motion-monitor container
+                #     time.sleep(3)
+                #     self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Another consolidation sweep of final output files
+                # except Exception as e:
+                #     logging.exception("Error consolidating output files into subdirectory.")
 
                 # self.connection.send_close()  # no need to send close message. If socket is open, keep listening
                 self.is_exhausted = True
@@ -114,6 +123,10 @@ class handleData:
             elif item[0] == 1022:   # image, should be all other items
                 self.save_image(item)
                 image_message, ismrmrd_image, header_bytes, attribute_bytes, data_bytes = item
+                try:
+                    self.latest_image_header = copy.deepcopy(ismrmrd_image.getHead())
+                except Exception:
+                    logging.exception("Failed to retain image header for motion dashboard; continuing acquisition.")
                 logging.info(f"\tReceived [{item[0]}] image number {self.imageNo}")
                 img_framenumber = ismrmrd_image.getHead().user_float[7]
                 logging.info(f"\tImage header frame number : {img_framenumber}")
@@ -165,9 +178,9 @@ class handleData:
                         self.refImgCoordFrame = self.refImgCoordFrame / np.linalg.norm(self.refImgCoordFrame, axis=0)   # make sure direction cosines are unit vectors
                         logging.info(f"\tRef image coord frame : {np.array2string(self.refImgCoordFrame, precision=4, separator=',', suppress_small=True)}")
                         self.refImgOrigin = self.get_first_voxel_center(imgGroup[0]['image'])
-
                         self.save_nrrd_volume_from_ismrmrd_data(imgGroup)  # Save as NRRD format, undo moco feedback when writing NHDR header
 
+                    self.package_and_send_motion_dashboard()
                     imgGroup = []       # clear imgGroup after each volume compilation
                     self.sliceNo = 0    # reset slice count to 0 for next volume
                     self.volcount += 1  # keep running count of acquired volumes
@@ -177,15 +190,15 @@ class handleData:
                 logging.info(f"Received [{item[0]}] close message.")
                 logging.info(f"Receive elapsed time (sec) : {time.time() - start_time}")
 
-                try:
-                    time.sleep(2)
-                    new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into subdirectory
-                    self.generate_close_file("closeQ")  # generate dummy close file to reset local-queue-processor container
-                    self.generate_close_file("closeM")  # generate dummy close file to reset motion-monitor container
-                    time.sleep(3)
-                    self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Consolidate outputs from reset processes
-                except Exception as e:
-                    logging.exception("Error consolidating output files into subdirectory.")
+                # try:
+                #     time.sleep(2)
+                #     new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into subdirectory
+                #     self.generate_close_file("closeQ")  # generate dummy close file to reset local-queue-processor container
+                #     self.generate_close_file("closeM")  # generate dummy close file to reset motion-monitor container
+                #     time.sleep(3)
+                #     self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Consolidate outputs from reset processes
+                # except Exception as e:
+                #     logging.exception("Error consolidating output files into subdirectory.")
 
                 self.connection.send_close()
                 self.is_exhausted = True
@@ -194,6 +207,94 @@ class handleData:
 
 
     # ---------- CLASS FUNCTIONS ----------
+
+    def get_motion_dashboard_filepath(self):
+        """Return the deterministic path of the motion monitor's published dashboard."""
+        return os.path.join(
+            self.datafolder,
+            f"motionMonitor_dashboard_{self.protocol_name}.jpg"
+        )
+
+
+    def create_motion_dashboard_ismrmrd_image(self, dashboard_filepath):
+        """Convert a dashboard JPEG to a scanner-displayable RGB ISMRMRD image."""
+        img = cv2.imread(dashboard_filepath)
+        if img is None:
+            raise ValueError(
+                f"cv2.imread failed to read dashboard: {dashboard_filepath}"
+            )
+
+        # Convert OpenCV BGR uint8 image to RGB.
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Scale 8-bit values [0, 255] to full uint16 range [0, 65535]
+        # Multiply by 257 = 0-->0, 255-->65535 = left-shift by 8 bits + original value (x*256 + x = x*257)
+        img_rgb = img_rgb.astype(np.uint16) * 257
+
+        height, width = img_rgb.shape[:2]
+
+        # Arrange as [channels, z, y, x] for ISMRMRD.
+        img_mrd = img_rgb.transpose((2, 0, 1))[:, np.newaxis, :, :]
+        dashboard_img = ismrmrd.Image.from_array(img_mrd, transpose=False)
+
+        # Reuse the latest incoming image header as a template.
+        dashboard_header = copy.deepcopy(self.latest_image_header)
+        dashboard_header.data_type = dashboard_img.data_type
+        dashboard_header.image_type = 6
+        dashboard_header.channels = 3
+        dashboard_header.matrix_size[0] = width
+        dashboard_header.matrix_size[1] = height
+        dashboard_header.matrix_size[2] = 1
+        dashboard_img.setHead(dashboard_header)
+
+        # Add metadata identifying this as an internally generated motion dashboard.
+        dashboard_meta = ismrmrd.Meta()
+        dashboard_meta['DataRole'] = 'Image'
+        dashboard_meta['ImageProcessingHistory'] = [
+            'FIRE',
+            'PYTHON',
+            'MOTION_DASHBOARD',
+            'RGB'
+        ]
+        dashboard_meta['SequenceDescriptionAdditional'] = 'MOTION_DASHBOARD'
+        dashboard_meta['Keep_image_geometry'] = 1
+        dashboard_meta['InternalSend'] = 1
+        dashboard_img.attribute_string = dashboard_meta.serialize()
+
+        return dashboard_img
+
+
+    def package_and_send_motion_dashboard(self):
+        """Best-effort send of the latest fully published dashboard to the scanner."""
+        if not self.send_dashboard_enabled:
+            return
+
+        try:
+            dashboard_filepath = self.get_motion_dashboard_filepath()
+            logging.info(f"Attempting to locate motion dashboard : {dashboard_filepath}")
+            if not os.path.isfile(dashboard_filepath):
+                logging.info(
+                    "Motion dashboard not available after volume %d. Skipping pushback.",
+                    self.volcount
+                )
+                return
+
+            if self.latest_image_header is None:
+                logging.warning(
+                    "No image header available for motion dashboard after volume %d. Skipping pushback.",
+                    self.volcount
+                )
+                return
+
+            dashboard_img = self.create_motion_dashboard_ismrmrd_image(dashboard_filepath)
+            self.connection.send_image(dashboard_img)
+            logging.info("Sent motion dashboard to scanner after volume %d.", self.volcount)
+        except Exception:
+            logging.exception(
+                "Failed to send motion dashboard after volume %d; continuing acquisition.",
+                self.volcount
+            )
+
 
     def consolidate_outputs_in_directory(self, new_subdir_name=None):
         """

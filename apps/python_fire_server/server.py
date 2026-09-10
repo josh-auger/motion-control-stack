@@ -17,9 +17,11 @@ class Server:
     Something something docstring.
     """
 
-    def __init__(self, address, port, savedataFolder, registration_type=None, moco_enabled=False):
+    def __init__(self, address, port, savedataFolder, registration_type=None, moco_enabled=False,
+                 send_dashboard_enabled=False):
         self.savedataFolder = savedataFolder
         self.moco_enabled = moco_enabled
+        self.send_dashboard_enabled = send_dashboard_enabled
         self.registration_type = registration_type
         self.log_handler = None
         self.log_filename = None
@@ -29,8 +31,10 @@ class Server:
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.socket.bind((address, port))
         logging.info(
-            "Starting server and listening for data at %s:%d (moco=%s)",
-            address, port, "ON" if self.moco_enabled else "OFF"
+            "Starting server and listening for data at %s:%d (moco=%s, dashboard=%s)",
+            address, port,
+            "ON" if self.moco_enabled else "OFF",
+            "ON" if self.send_dashboard_enabled else "OFF"
         )
 
     def setup_logging(self):
@@ -68,7 +72,13 @@ class Server:
     def handle(self, sock):
         try:
             connection = Connection(sock)
-            outdata = handleData(connection, self.savedataFolder, self.moco_enabled, self.registration_type)    # Run analysis code "handle_volumes.py"
+            outdata = handleData(
+                connection,
+                self.savedataFolder,
+                self.moco_enabled,
+                self.registration_type,
+                self.send_dashboard_enabled
+            )    # Run analysis code "handle_volumes.py"
             for item in outdata:
                 hfile = item
         except Exception as e:

@@ -14,7 +14,8 @@ defaults = {
     'host':           '0.0.0.0',
     'port':           9002,
     'savedataFolder': '/tmp/share/saved_data',
-    'moco':           'off'  # default to no moco feedback send
+    'moco':           'off',  # default to no moco feedback send
+    'send_dashboard': 'off'
 }
 
 def main(args):
@@ -26,8 +27,18 @@ def main(args):
         print("Motion correction DISABLED.")
         moco_enabled = False
 
+    send_dashboard_enabled = args.send_dashboard.lower() == 'on'
+    print(f"Scanner motion dashboard {'ENABLED' if send_dashboard_enabled else 'DISABLED'}.")
+
     # Create a multi-threaded dispatcher to handle incoming connections
-    server = Server(args.host, args.port, args.savedataFolder, args.regtype, moco_enabled=(args.moco.lower() == 'on'))
+    server = Server(
+        args.host,
+        args.port,
+        args.savedataFolder,
+        args.regtype,
+        moco_enabled=moco_enabled,
+        send_dashboard_enabled=send_dashboard_enabled
+    )
 
     # Trap signal interrupts (e.g. ctrl+c, SIGTERM) and gracefully stop
     def handle_signals(signum, frame):
@@ -52,6 +63,7 @@ if __name__ == '__main__':
     parser.add_argument('-S', '--savedataFolder',  type=str,            help='Folder to save incoming data')
     parser.add_argument('-r', '--crlf',            action='store_true', help='Use Windows (CRLF) line endings')
     parser.add_argument('--moco', type=str, choices=['on', 'off'], help='Enable/disable motion correction')
+    parser.add_argument('--send-dashboard', choices=['on', 'off'], help='Enable/disable scanner motion dashboard return')
     parser.add_argument('--regtype', type=str, choices=['slice', 'smsgroup', 'volume'], help='Registration type')
 
     parser.set_defaults(**defaults)
