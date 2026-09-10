@@ -416,6 +416,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         # parameters_filepath = os.path.join(input_dir, f"motionMonitor_parameters_{state['protocol_name']}.jpg")
         # displacements_filepath = os.path.join(input_dir, f"motionMonitor_framewise_displacement_{state['protocol_name']}.jpg")
         dashboard_filepath = os.path.join(input_dir, f"motionMonitor_dashboard_{state['protocol_name']}.jpg")
+        tmp_dashboard_filepath = os.path.join(input_dir, f".motionMonitor_dashboard_{state['protocol_name']}.tmp.jpg")
         if not motion_df.empty:
             # plot_parameters_combined(
             #     motion_df,
@@ -428,16 +429,33 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             #     threshold=motion_threshold,
             #     num_expected_volumes=state['total_repetitions'],
             #     num_moved_volumes=state['volume_motion_count'])
-            plot_motion_dashboard(
-                motion_df,
-                output_filename=dashboard_filepath,
-                protocol_name=state['protocol_name'],
-                threshold=motion_threshold,
-                num_expected_volumes=state['total_repetitions'],
-                num_moved_volumes=state['volume_motion_count'],
-                host_ip=host_ip,
-                host_port=PORT,
-                livestream_enabled=(stream_flag == "on"))
+            try:
+                if os.path.exists(tmp_dashboard_filepath):
+                    os.remove(tmp_dashboard_filepath)
+
+                plot_motion_dashboard(
+                    motion_df,
+                    output_filename=tmp_dashboard_filepath,
+                    protocol_name=state['protocol_name'],
+                    threshold=motion_threshold,
+                    num_expected_volumes=state['total_repetitions'],
+                    num_moved_volumes=state['volume_motion_count'],
+                    host_ip=host_ip,
+                    host_port=PORT,
+                    livestream_enabled=(stream_flag == "on"))
+
+                if not os.path.isfile(tmp_dashboard_filepath):
+                    raise FileNotFoundError(f"Dashboard was not created: {tmp_dashboard_filepath}")
+
+                os.replace(tmp_dashboard_filepath, dashboard_filepath)
+            except Exception:
+                if os.path.exists(tmp_dashboard_filepath):
+                    try:
+                        os.remove(tmp_dashboard_filepath)
+                    except OSError:
+                        logging.exception("Failed to clean up temporary motion dashboard.")
+                logging.exception("Failed to generate motion dashboard; keeping previous dashboard.")
+                return
 
             # Safe image load and stream push
             try:
