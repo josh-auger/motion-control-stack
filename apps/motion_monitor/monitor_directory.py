@@ -30,6 +30,7 @@ from generate_motion_plots import (
     plot_displacements,
     plot_motion_dashboard
 )
+from tsnr_integration import TSNRVolumeProcessor
 
 
 def setup_logging(log_dir):
@@ -221,6 +222,8 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
 
     log_dir = input_dir
     VALID_EXTENSIONS = {'.json', '.tfm', '.closeM'}  # JDA: ONLY read incoming files with listed valid extensions!
+    # Include FIRE group-pointer events as the primary TSNR trigger.
+    VALID_EXTENSIONS = VALID_EXTENSIONS | {'.txt'}
     logging.info(f"Monitoring directory [{VALID_EXTENSIONS}] : {input_dir} ...")
 
     # Reset all monitoring state variables
@@ -251,6 +254,19 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             "final_plot_done": False
         }
     state = reset_variables()
+
+    TSNR_MIN_SAMPLES = 20
+    tsnr_output_path = os.path.join(input_dir, "tsnr_dashboard.jpg")
+    tsnr_processor = TSNRVolumeProcessor(
+        input_dir,
+        tsnr_output_path,
+        min_samples=TSNR_MIN_SAMPLES,
+        display_max=100.0,
+        idle_retry_interval=1.0,
+    )
+    tsnr_accumulator = tsnr_processor.accumulator
+    tsnr_pending_volumes = tsnr_processor.pending_volumes
+    tsnr_processed_volumes = tsnr_processor.processed_volumes
 
     # Helper functions
     # -------------------------------------------
@@ -507,6 +523,10 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         # temp_seen = state["seen_files"]
         nonlocal_state = reset_variables()
         state.update(nonlocal_state)
+        # Reset the accumulator plus pending/processed volume state. The last
+        # tsnr_dashboard.jpg intentionally remains visible after acquisition.
+        tsnr_processor.reset()
+        logging.info("TSNR: reset on .closeM")
         # state["seen_files"] = temp_seen     # DEV: re-assign all seen files to prevent repeat processing, for now
         time.sleep(3.0)  # Brief sleep before monitoring directory again, allow output files to be organized
         logging.info("\n\n---- Motion-monitor reset ----")
@@ -535,6 +555,12 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             time.sleep(0.005)
             if state["begintime"] is None:
                 continue    # no monitoring started, wait
+
+            # One throttled, non-blocking pass prevents the final volume from
+            # remaining pending when no later pointer or transform arrives.
+            tsnr_processor.retry_pending_if_due(
+                len(state["slice_timings"]) or None,
+            )
 
             if state["idle_since"] is None:
                 state["idle_since"] = time.time()   # start idle timer
@@ -577,6 +603,26 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     store_metadata_filepath(new_filepath)
                     continue
 
+                # A stable FIRE group pointer is the primary TSNR trigger.
+                # Every group pointer makes one idempotent completeness attempt;
+                # no assumption is made about which group number is final.
+                if ext == ".txt":
+                    if not wait_for_complete_write(new_filepath):
+                        state["seen_files"].add(fname)
+                        continue
+                    if not state["slice_timings"] and state["metadata_filepath"]:
+                        try:
+                            metadata_object = load_metadata_from_json(state["metadata_filepath"])
+                            get_slice_timings_from_metadata(metadata_object)
+                        except Exception as error:
+                            logging.warning(f"TSNR: metadata unavailable: {error}")
+                    tsnr_processor.handle_pointer(
+                        new_filepath,
+                        len(state["slice_timings"]) or None,
+                    )
+                    state["seen_files"].add(fname)
+                    continue
+
                 # Handle transform files
                 if ext == ".tfm":
                     get_counters_from_filename(new_filepath)
@@ -595,6 +641,12 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                         state["prior_transform"] = new_filepath
 
                     track_framewise_displacement(new_filepath, state["prior_transform"], head_radius, motion_threshold)
+
+                    # Registration remains independent of TSNR. A transform is
+                    # only an extra opportunity to retry pointer-observed volumes.
+                    tsnr_processor.retry_pending(
+                        len(state["slice_timings"]) or None,
+                    )
                     # if (state["volcount"] // 5) > (state["last_plotted_volcount"] // 5):    # update dashboard every N volumes
                     if state["itemcount"] % 20 == 0:
                         plot_motion_data(input_dir)
