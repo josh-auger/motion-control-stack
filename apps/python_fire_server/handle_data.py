@@ -259,6 +259,7 @@ class handleData:
         dashboard_meta['SequenceDescriptionAdditional'] = 'MOTION_DASHBOARD'
         dashboard_meta['Keep_image_geometry'] = 1
         dashboard_meta['InternalSend'] = 1
+        dashboard_meta['SiemensControl_SkipSaveOnHost'] = ['bool', 'true']  # Only display in inline viewer, no DICOMs generated
         dashboard_img.attribute_string = dashboard_meta.serialize()
 
         return dashboard_img
