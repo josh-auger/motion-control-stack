@@ -8,9 +8,13 @@ import cv2
 import numpy as np
 
 from apps.motion_monitor.running_tsnr import (
+    TSNR_AXIAL_POSITIONS,
     RunningTSNR,
     atomic_save_tsnr_image,
+    calculate_mean_tsnr,
     create_tsnr_mosaic,
+    get_tsnr_axial_indices,
+    get_tsnr_display_slices,
 )
 
 
@@ -101,6 +105,30 @@ class RunningTSNRTests(unittest.TestCase):
             dtype=np.uint8,
         )
         np.testing.assert_array_equal(mosaic, expected)
+
+    def test_display_slices_share_locations_orientation_and_fixed_range(self) -> None:
+        volume = np.broadcast_to(np.arange(10)[:, None, None], (10, 2, 3)).copy()
+        volume[:, 0, :] += 100
+        slices = get_tsnr_display_slices(volume, display_max=10.0)
+
+        self.assertEqual(TSNR_AXIAL_POSITIONS, (0.20, 0.40, 0.60, 0.80))
+        self.assertEqual(get_tsnr_axial_indices(10), (2, 4, 6, 8))
+        self.assertEqual(slices.shape, (4, 2, 3))
+        self.assertTrue(np.all(slices[:, 0, :] < slices[:, 1, :]))
+        self.assertLessEqual(float(slices.max()), 10.0)
+
+    def test_mean_tsnr_uses_only_finite_positive_full_volume_voxels(self) -> None:
+        tsnr = np.array(
+            [
+                [[0.0, 10.0], [20.0, np.nan]],
+                [[np.inf, -5.0], [30.0, 40.0]],
+            ]
+        )
+        self.assertEqual(calculate_mean_tsnr(tsnr), 25.0)
+        self.assertEqual(
+            calculate_mean_tsnr(np.array([[[0.0, -1.0, np.nan, np.inf]]])),
+            0.0,
+        )
 
     def test_atomic_save_produces_readable_jpeg(self) -> None:
         mosaic = create_tsnr_mosaic(self.stack[0], output_shape=(31, 29))

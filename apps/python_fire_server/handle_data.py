@@ -84,16 +84,11 @@ class handleData:
                 logging.info("\tThe connection will be closed since no data has been received.")
                 logging.info(f"\tReceive elapsed time (sec) : {time.time() - start_time}")
 
-                # try:
-                #     logging.info(f"")
-                #     time.sleep(2)   # sympathetic pause to let queue processor catch up
-                #     new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into a date-time stamped subdirectory
-                #     self.generate_close_file("closeQ")  # generate dummy close file to pass to local-queue-processor container
-                #     self.generate_close_file("closeM")  # generate dummy close file to pass to motion-monitor container
-                #     time.sleep(3)
-                #     self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Another consolidation sweep of final output files
-                # except Exception as e:
-                #     logging.exception("Error consolidating output files into subdirectory.")
+                try:
+                    logging.info(f"")
+                    self.finalize_acquisition_outputs()
+                except Exception:
+                    logging.exception("Error finalizing acquisition outputs.")
 
                 # self.connection.send_close()  # no need to send close message. If socket is open, keep listening
                 self.is_exhausted = True
@@ -148,7 +143,7 @@ class handleData:
                     self.save_nrrd_slice_from_ismrmrd_data(ismrmrd_image, img_filename)
                     self.groupcount += 1
                     logging.info(f"\tVolume {self.volcount} group {floor(self.sliceNo / self.groupsize)} : {self.groupcount}/{self.groupsize}")
-                    
+
                     # JDA: when desired group size is reached (slice, slice group, volume), generate group pointer file
                     if self.groupcount == self.groupsize:
                         recent_group = imgGroup[-self.groupsize:]
@@ -190,15 +185,10 @@ class handleData:
                 logging.info(f"Received [{item[0]}] close message.")
                 logging.info(f"Receive elapsed time (sec) : {time.time() - start_time}")
 
-                # try:
-                #     time.sleep(2)
-                #     new_subdir_name = self.consolidate_outputs_in_directory()  # Move all output files into subdirectory
-                #     self.generate_close_file("closeQ")  # generate dummy close file to reset local-queue-processor container
-                #     self.generate_close_file("closeM")  # generate dummy close file to reset motion-monitor container
-                #     time.sleep(3)
-                #     self.consolidate_outputs_in_directory(new_subdir_name=new_subdir_name)  # Consolidate outputs from reset processes
-                # except Exception as e:
-                #     logging.exception("Error consolidating output files into subdirectory.")
+                try:
+                    self.finalize_acquisition_outputs()
+                except Exception:
+                    logging.exception("Error finalizing acquisition outputs.")
 
                 self.connection.send_close()
                 self.is_exhausted = True
@@ -319,6 +309,30 @@ class handleData:
 
         logging.info(f"\tMoved output files into subdirectory : {new_subdir_path}")
         return new_subdir_name
+
+
+    def wait_for_close_acknowledgement(self, filepath, timeout=300.0, delay=0.05):
+        """Wait until a consumer deletes its close marker as acknowledgement."""
+        deadline = time.monotonic() + timeout
+        while os.path.exists(filepath):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for close acknowledgement: {filepath}"
+                )
+            time.sleep(delay)
+
+
+    def finalize_acquisition_outputs(self):
+        """Drain queue and monitor state before consolidating acquisition files."""
+        close_queue_path = self.generate_close_file("closeQ")
+        self.wait_for_close_acknowledgement(close_queue_path)
+
+        # Queue acknowledgement guarantees registration_status.json includes
+        # every terminal group decision, including those for the final volume.
+        close_monitor_path = self.generate_close_file("closeM")
+        self.wait_for_close_acknowledgement(close_monitor_path)
+
+        return self.consolidate_outputs_in_directory()
 
 
     def log_ismrmrd_image_metadata(self, ismrmrd_img):
@@ -1043,4 +1057,4 @@ class handleData:
             except Exception:
                 pass
             raise
-        return
+        return filepath

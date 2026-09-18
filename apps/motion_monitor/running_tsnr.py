@@ -10,6 +10,9 @@ import cv2
 import numpy as np
 
 
+TSNR_AXIAL_POSITIONS = (0.20, 0.40, 0.60, 0.80)
+
+
 class RunningTSNR:
     """Maintain voxelwise running statistics without retaining prior volumes.
 
@@ -109,12 +112,7 @@ def create_tsnr_mosaic(
     dimensions of one input slice.
     """
     volume = np.asarray(tsnr_volume)
-    if volume.ndim != 3:
-        raise ValueError(f"Expected a 3D TSNR volume, got shape {volume.shape}.")
-    if any(d == 0 for d in volume.shape):
-        raise ValueError(f"TSNR volume dimensions must be nonzero, got {volume.shape}.")
-    if not np.isfinite(display_max) or display_max <= 0:
-        raise ValueError("display_max must be a finite value greater than zero.")
+    display_slices = get_tsnr_display_slices(volume, display_max=display_max)
 
     if output_shape is None:
         height, width = int(volume.shape[1]), int(volume.shape[2])
@@ -125,25 +123,12 @@ def create_tsnr_mosaic(
         if height < 2 or width < 2:
             raise ValueError("output_shape height and width must both be at least 2.")
 
-    finite_volume = np.nan_to_num(
-        volume.astype(np.float64, copy=False),
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    )
-    scaled = np.clip(finite_volume, 0.0, display_max) * (255.0 / display_max)
-    display_volume = np.rint(scaled).astype(np.uint8)
-    display_volume = np.flip(display_volume, axis=1)
-
-    z_indices = [
-        min(int(position * volume.shape[0]), volume.shape[0] - 1)
-        for position in (0.20, 0.40, 0.60, 0.80)
-    ]
+    scaled_slices = np.rint(display_slices * (255.0 / display_max)).astype(np.uint8)
     row_heights = (height // 2, height - height // 2)
     column_widths = (width // 2, width - width // 2)
     mosaic = np.zeros((height, width), dtype=np.uint8)
 
-    for tile_number, z_index in enumerate(z_indices):
+    for tile_number, display_slice in enumerate(scaled_slices):
         row, column = divmod(tile_number, 2)
         tile_height = row_heights[row]
         tile_width = column_widths[column]
@@ -153,7 +138,7 @@ def create_tsnr_mosaic(
             else cv2.INTER_LINEAR
         )
         tile = cv2.resize(
-            display_volume[z_index],
+            display_slice,
             (tile_width, tile_height),
             interpolation=interpolation,
         )
@@ -162,6 +147,56 @@ def create_tsnr_mosaic(
         mosaic[y_start:y_start + tile_height, x_start:x_start + tile_width] = tile
 
     return mosaic
+
+
+def get_tsnr_axial_indices(depth: int) -> tuple[int, int, int, int]:
+    """Map the established normalized axial locations to valid indices."""
+    depth = int(depth)
+    if depth <= 0:
+        raise ValueError("TSNR volume depth must be greater than zero.")
+    return tuple(
+        min(int(position * depth), depth - 1)
+        for position in TSNR_AXIAL_POSITIONS
+    )
+
+
+def get_tsnr_display_slices(
+    tsnr_volume: np.ndarray,
+    display_max: float = 100.0,
+) -> np.ndarray:
+    """Return four clipped, y-flipped axial slices in TSNR display units."""
+    volume = np.asarray(tsnr_volume)
+    if volume.ndim != 3:
+        raise ValueError(f"Expected a 3D TSNR volume, got shape {volume.shape}.")
+    if any(d == 0 for d in volume.shape):
+        raise ValueError(f"TSNR volume dimensions must be nonzero, got {volume.shape}.")
+    if not np.isfinite(display_max) or display_max <= 0:
+        raise ValueError("display_max must be a finite value greater than zero.")
+
+    finite_volume = np.nan_to_num(
+        volume.astype(np.float64, copy=False),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    display_volume = np.flip(
+        np.clip(finite_volume, 0.0, display_max),
+        axis=1,
+    )
+    return display_volume[list(get_tsnr_axial_indices(volume.shape[0]))]
+
+
+def calculate_mean_tsnr(tsnr_volume: np.ndarray) -> float:
+    """Return the mean over finite positive voxels in the complete TSNR map."""
+    volume = np.asarray(tsnr_volume, dtype=np.float64)
+    if volume.ndim != 3:
+        raise ValueError(f"Expected a 3D TSNR volume, got shape {volume.shape}.")
+    # Without a brain mask, only finite positive voxels contribute so zero-valued
+    # background and undefined statistics do not dominate the displayed mean.
+    valid = np.isfinite(volume) & (volume > 0)
+    if not np.any(valid):
+        return 0.0
+    return float(np.mean(volume[valid]))
 
 
 def atomic_save_tsnr_image(

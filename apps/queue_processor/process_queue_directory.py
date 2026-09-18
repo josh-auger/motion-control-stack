@@ -26,6 +26,13 @@ import pandas as pd
 from datetime import datetime
 import json
 from myhelpers_jauger.resample_nrrd_image import resample_nrrd_volume
+try:
+    from .registration_status import RegistrationStatusTracker
+except ImportError:  # Support execution from the queue_processor application directory.
+    from registration_status import RegistrationStatusTracker
+
+
+REGISTRATION_STATUS_FILENAME = "registration_status.json"
 
 
 def setup_logging(log_dir):
@@ -140,7 +147,31 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
     for fpath, label in all_files:
         if not os.path.exists(fpath):
             logging.info(f"Registration FAILED. {label} file not found : {fpath}")
-            return None
+            return False
+
+    expected_transform = os.path.join(
+        os.path.dirname(reference_volume_filepath),
+        f"alignTransform_{outputTransformLabel}.tfm",
+    )
+    try:
+        previous_transform_signature = (
+            os.stat(expected_transform).st_mtime_ns,
+            os.stat(expected_transform).st_size,
+        )
+    except FileNotFoundError:
+        previous_transform_signature = None
+
+    def transform_was_produced():
+        try:
+            current_signature = (
+                os.stat(expected_transform).st_mtime_ns,
+                os.stat(expected_transform).st_size,
+            )
+        except FileNotFoundError:
+            return False
+        return previous_transform_signature is None or (
+            current_signature != previous_transform_signature
+        )
 
     if REG_ENGINE == "sms-mi-reg":
         optimizer = "LN_SBPLX"
@@ -159,10 +190,10 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
         start_time = time.time()
         try:
             registration_process = subprocess.run(
-                run_command, 
-                shell=False, 
-                text=True, 
-                capture_output=True, 
+                run_command,
+                shell=False,
+                text=True,
+                capture_output=True,
                 check=True
             )
 
@@ -174,11 +205,17 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
             logging.info(
                 f"Registration call elapsed runtime (sec) : {run_time:.10f}"
             )
-            return None
-        
+            if not transform_was_produced():
+                logging.error(
+                    "Registration FAILED. Expected transform was not produced: %s",
+                    expected_transform,
+                )
+                return False
+            return True
+
         except subprocess.CalledProcessError as e:
             logging.error(f"Registration FAILED : {e.stderr}")
-            return None
+            return False
 
     elif REG_ENGINE == "cuda":
         logging.info("CUDA registration backend selected.")
@@ -215,11 +252,21 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
             logging.info(
                 f"CUDA registration call elapsed runtime (sec) : {run_time:.10f}"
             )
+            if not transform_was_produced():
+                logging.error(
+                    "CUDA registration FAILED. Expected transform was not produced: %s",
+                    expected_transform,
+                )
+                return False
+            return True
         except subprocess.CalledProcessError as e:
             logging.error(
                 f"CUDA registration FAILED:\n{e.stderr}"
             )
-            return None
+            return False
+
+    logging.error("Registration FAILED. Unsupported registration engine: %s", REG_ENGINE)
+    return False
 
 
 def compose_transform_pair(transform1, transform2):
@@ -400,9 +447,15 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
             "slice_timings": None,
             "motion_table": [],
             "cumulative_displacement": 0.0,
-            "motion_flag_count": 0
+            "motion_flag_count": 0,
+            "expected_group_ids": None,
+            "acquisition_closed": False,
+            "closed_at_ns": None,
         }
     state = reset_variables()
+    registration_status = RegistrationStatusTracker(
+        os.path.join(input_dir, REGISTRATION_STATUS_FILENAME),
+    )
 
     # Helper functions
     # -------------------------------------------
@@ -411,6 +464,8 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
         ignoring files that disappear during the scan."""
         valid_files = []
         for f in os.listdir(input_dir):
+            if f == REGISTRATION_STATUS_FILENAME:
+                continue
             # Skip wrong extensions
             if os.path.splitext(f)[1] not in VALID_EXTENSIONS:
                 continue
@@ -428,8 +483,28 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
 
             valid_files.append((f, mtime))
 
-        # Sort by mtime: oldest → newest
-        valid_files.sort(key=lambda x: x[1])
+        def fifo_order(item):
+            filename, mtime = item
+            extension = os.path.splitext(filename)[1]
+            if extension == ".json":
+                return (0, 0, 0, mtime, filename)
+            if extension == ".txt":
+                match = re.search(r"volume_(\d{4})_group_(\d{4})", filename)
+                if match:
+                    return (
+                        1,
+                        int(match.group(1)),
+                        int(match.group(2)),
+                        mtime,
+                        filename,
+                    )
+                return (1, sys.maxsize, sys.maxsize, mtime, filename)
+            # Acquisition close is always processed after the pointer snapshot.
+            return (2, 0, 0, mtime, filename)
+
+        # Stable acquisition order is required for close to mean that all
+        # registration scheduling decisions have already been made.
+        valid_files.sort(key=fifo_order)
         # Return only new files not yet processed
         return [f for (f, _) in valid_files]
 
@@ -442,6 +517,8 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
         for f in new_files:
             if f != newest:
                 logging.info(f"Old file found. Skipping {f}")
+                if os.path.splitext(f)[1] == ".txt":
+                    record_skipped_pointer(os.path.join(input_dir, f))
                 state["seen_files"].add(f)
         return [newest]
 
@@ -478,15 +555,78 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
             listed = [line.strip() for line in f if line.strip()]
         return [os.path.join(input_dir, name) for name in listed]
 
-    def update_counters_from_pointer_file(pointer_filepath):
-        """Extract volume count string and slice group count string from pointer filename."""
+    def get_counters_from_pointer_file(pointer_filepath):
+        """Extract volume and registration-group numbers from a pointer filename."""
         basefilename = os.path.basename(pointer_filepath)
         match = re.search(r"volume_(\d{4})_group_(\d{4})", basefilename)
         if not match:
             raise ValueError(f"Filename does not match expected pattern: {basefilename}")
-        state["volcount"] = int(match.group(1))
-        state["groupcount"] = int(match.group(2))
-        return
+        return int(match.group(1)), int(match.group(2))
+
+    def update_counters_from_pointer_file(pointer_filepath):
+        """Update current counters from a pointer filename."""
+        state["volcount"], state["groupcount"] = get_counters_from_pointer_file(
+            pointer_filepath
+        )
+
+    def set_expected_groups(volume_number, group_number, target_paths):
+        """Set exact group membership from reference metadata and pointer mode."""
+        if volume_number == 0:
+            expected_group_ids = {group_number}
+        else:
+            slice_count = len(state["slice_timings"] or [])
+            group_size = len(target_paths)
+            if slice_count <= 0 or group_size <= 0 or slice_count % group_size:
+                raise ValueError(
+                    f"cannot infer exact groups from {slice_count} slices and "
+                    f"group size {group_size}"
+                )
+            inferred = set(range(slice_count // group_size))
+            existing = state["expected_group_ids"]
+            if existing is not None and existing != inferred:
+                raise ValueError(
+                    f"registration group membership changed from {sorted(existing)} "
+                    f"to {sorted(inferred)}"
+                )
+            state["expected_group_ids"] = inferred
+            expected_group_ids = inferred
+        if group_number not in expected_group_ids:
+            raise ValueError(
+                f"unexpected group {group_number} for volume {volume_number}; "
+                f"expected {sorted(expected_group_ids)}"
+            )
+        registration_status.set_expected_groups(volume_number, expected_group_ids)
+
+    def record_group_outcome(volume_number, group_number, status, transform_filename=None):
+        """Record a terminal outcome and publish if it completes the volume."""
+        registration_status.record_group(
+            volume_number,
+            group_number,
+            status,
+            transform_filename=transform_filename,
+        )
+        try:
+            registration_status.finalize_volume_if_ready(volume_number)
+        except OSError as error:
+            # The in-memory terminal decision remains frozen. A later group or
+            # acquisition-close publication will retry the durable snapshot.
+            logging.error("REG STATUS: atomic publication failed: %s", error)
+
+    def record_skipped_pointer(pointer_filepath):
+        """Durably represent a pointer intentionally discarded by FIFO-off mode."""
+        try:
+            if not wait_for_complete_write(pointer_filepath):
+                raise FileNotFoundError("pointer disappeared before skip was recorded")
+            volume_number, group_number = get_counters_from_pointer_file(pointer_filepath)
+            target_paths = read_pointer_file(pointer_filepath)
+            set_expected_groups(volume_number, group_number, target_paths)
+            record_group_outcome(volume_number, group_number, "skipped")
+        except Exception as error:
+            logging.error(
+                "REG STATUS: failed to record skipped pointer %s: %s",
+                os.path.basename(pointer_filepath),
+                error,
+            )
 
     def initialize_reference_volume(input_dir, target_paths):
         """Set first batch as reference volume."""
@@ -532,7 +672,23 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
         # JDA: Carry this registration/volume/group identity into the GPU output filename. Existing consumers
         # JDA: currently discover alignTransform_<regcount>.tfm, so either preserve that exact name or update
         # JDA: maybe_update_reference, fire-server, and motion-monitor together to use the new naming contract.
-        run_MIregistration(state["reference_volume_filepath"], target_paths, input_transform, output_string, reg_engine)
+        try:
+            succeeded = run_MIregistration(
+                state["reference_volume_filepath"],
+                target_paths,
+                input_transform,
+                output_string,
+                reg_engine,
+            )
+        except Exception:
+            logging.exception(
+                "Registration FAILED for volume %d group %d",
+                state["volcount"],
+                state["groupcount"],
+            )
+            succeeded = False
+        transform_filename = f"alignTransform_{output_string}.tfm"
+        return ("registered", transform_filename) if succeeded else ("failed", None)
 
     def maybe_update_reference(input_dir, pointer_filepath):
         """Check reference volume transform and update if needed."""
@@ -560,6 +716,23 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
         """Handle close trigger file."""
         logging.info(f"Reset trigger detected : {os.path.basename(filepath)}")
         try:
+            registration_status.finalize_all_ready()
+            unfinalized = registration_status.unfinalized_volumes()
+            if unfinalized:
+                logging.error(
+                    "REG STATUS: refusing acquisition close; volumes lack terminal "
+                    "group decisions: %s",
+                    unfinalized,
+                )
+                return
+            registration_status.publish()
+        except Exception as error:
+            logging.error("REG STATUS: close publication failed: %s", error)
+            return
+
+        # Deletion acknowledges that all observed volumes are terminal and the
+        # durable status snapshot has been published.
+        try:
             os.remove(filepath)
         except Exception as e:
             logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
@@ -570,6 +743,8 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
         # Reset all state
         nonlocal_state = reset_variables()
         state.update(nonlocal_state)
+        state["acquisition_closed"] = True
+        state["closed_at_ns"] = time.time_ns()
         logging.info("\n\n---- Local-queue-processor reset ----")
         return
 
@@ -577,6 +752,32 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
     # Main monitoring loop
     # =====================================================================
     while True:
+        if state["acquisition_closed"]:
+            # FIRE consolidates only after queue and monitor acknowledgements.
+            # Keep finalized state frozen until metadata newer than close proves
+            # that a subsequent acquisition has actually begun.
+            newer_metadata_exists = False
+            for filename in os.listdir(input_dir):
+                if (
+                    os.path.splitext(filename)[1] != ".json"
+                    or filename == REGISTRATION_STATUS_FILENAME
+                ):
+                    continue
+                try:
+                    if (
+                        os.stat(os.path.join(input_dir, filename)).st_mtime_ns
+                        > state["closed_at_ns"]
+                    ):
+                        newer_metadata_exists = True
+                        break
+                except FileNotFoundError:
+                    continue
+            if not newer_metadata_exists:
+                time.sleep(0.005)
+                continue
+            registration_status.reset_memory()
+            state["acquisition_closed"] = False
+
         new_files = list_new_files()
         if not new_files:
             time.sleep(0.005)
@@ -623,11 +824,53 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
                     target_paths = read_pointer_file(new_filepath)
                     logging.info(f"Added {len(target_paths)} file(s) from {fname} to pending targets.")
 
+                    if registration_status.is_finalized(state["volcount"]):
+                        logging.warning(
+                            "REG STATUS: refusing late pointer for finalized volume %d: %s",
+                            state["volcount"],
+                            fname,
+                        )
+                        state["seen_files"].add(fname)
+                        continue
+
                     # First pointer file --> reference volume
                     if state["reference_volume_filepath"] is None:
                         identity_transform_path = initialize_reference_volume(input_dir, target_paths)
+                        set_expected_groups(
+                            state["volcount"], state["groupcount"], target_paths
+                        )
+                        identity_filename = os.path.basename(identity_transform_path)
+                        if os.path.isfile(identity_transform_path):
+                            record_group_outcome(
+                                state["volcount"],
+                                state["groupcount"],
+                                "registered",
+                                identity_filename,
+                            )
+                        else:
+                            record_group_outcome(
+                                state["volcount"], state["groupcount"], "failed"
+                            )
                     else:
-                        run_registration_batch(input_dir, target_paths, identity_transform_path)
+                        try:
+                            set_expected_groups(
+                                state["volcount"], state["groupcount"], target_paths
+                            )
+                        except Exception as error:
+                            logging.error(
+                                "REG STATUS: refusing pointer %s: %s", fname, error
+                            )
+                            state["seen_files"].add(fname)
+                            continue
+                        outcome, transform_filename = run_registration_batch(
+                            input_dir, target_paths, identity_transform_path
+                        )
+                        record_group_outcome(
+                            state["volcount"],
+                            state["groupcount"],
+                            outcome,
+                            transform_filename,
+                        )
                         # Check reference volume status
                         maybe_update_reference(input_dir, new_filepath)
 

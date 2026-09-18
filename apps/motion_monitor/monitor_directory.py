@@ -26,6 +26,8 @@ from datetime import datetime
 import json
 import mjpeg_server_module
 from generate_motion_plots import (
+    DASHBOARD_PIXEL_HEIGHT,
+    DASHBOARD_PIXEL_WIDTH,
     plot_parameters_combined,
     plot_displacements,
     plot_motion_dashboard
@@ -224,6 +226,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
     VALID_EXTENSIONS = {'.json', '.tfm', '.closeM'}  # JDA: ONLY read incoming files with listed valid extensions!
     # Include FIRE group-pointer events as the primary TSNR trigger.
     VALID_EXTENSIONS = VALID_EXTENSIONS | {'.txt'}
+    REGISTRATION_STATUS_FILENAME = "registration_status.json"
     logging.info(f"Monitoring directory [{VALID_EXTENSIONS}] : {input_dir} ...")
 
     # Reset all monitoring state variables
@@ -251,11 +254,12 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             "last_plotted_volcount": 0,
             "idle_since": None,
             "idle_time": 0,
-            "final_plot_done": False
+            "final_plot_done": False,
+            "registration_status_signature": None,
         }
     state = reset_variables()
 
-    TSNR_MIN_SAMPLES = 20
+    TSNR_MIN_SAMPLES = 10
     tsnr_output_path = os.path.join(input_dir, "tsnr_dashboard.jpg")
     tsnr_processor = TSNRVolumeProcessor(
         input_dir,
@@ -279,17 +283,26 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             if os.path.splitext(f)[1] not in VALID_EXTENSIONS:
                 continue
             # Skip files that have already been processed
-            if f in state["seen_files"]:
+            if f in state["seen_files"] and f != REGISTRATION_STATUS_FILENAME:
                 continue
 
             full_path = os.path.join(input_dir, f)
             try:    # attempt to ping for modification time
-                mtime = os.path.getmtime(full_path)
+                stat_result = os.stat(full_path)
+                mtime = stat_result.st_mtime
             except FileNotFoundError:
                 # File disappeared between os.listdir() and os.path.getmtime() (i.e. end of sequence consolidation)
                 logging.info(f"Unable to ping file for mod time : {full_path}")
                 continue
 
+            if f == REGISTRATION_STATUS_FILENAME:
+                signature = (
+                    stat_result.st_ino,
+                    stat_result.st_mtime_ns,
+                    stat_result.st_size,
+                )
+                if signature == state["registration_status_signature"]:
+                    continue
             valid_files.append((f, mtime))
 
         # Sort by mtime: oldest → newest
@@ -379,13 +392,13 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         if not os.path.exists(prior_transform_filepath):
             logging.warning(f"Prior transform file no longer exists : {prior_transform_filepath}")
             return
-        
+
         prior_transform = read_transform_as_euler(prior_transform_filepath)
 
         if not os.path.exists(current_transform_filepath):
             logging.warning(f"Current transform file no longer exists : {current_transform_filepath}")
             return
-        
+
         current_transform = read_transform_as_euler(current_transform_filepath)
 
         combined_transform = compose_transform_pair(prior_transform, current_transform)
@@ -435,6 +448,18 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                 if os.path.exists(tmp_dashboard_filepath):
                     os.remove(tmp_dashboard_filepath)
 
+                tsnr_volume = None
+                tsnr_count = tsnr_accumulator.count
+                if tsnr_count >= TSNR_MIN_SAMPLES:
+                    try:
+                        tsnr_volume = tsnr_accumulator.get_tsnr()
+                    except Exception as error:
+                        logging.warning(
+                            "TSNR: dashboard map unavailable at n=%d: %s",
+                            tsnr_count,
+                            error,
+                        )
+
                 plot_motion_dashboard(
                     motion_df,
                     output_filename=tmp_dashboard_filepath,
@@ -444,7 +469,12 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     num_moved_volumes=state['volume_motion_count'],
                     host_ip=host_ip,
                     host_port=PORT,
-                    livestream_enabled=(stream_flag == "on"))
+                    livestream_enabled=(stream_flag == "on"),
+                    tsnr_volume=tsnr_volume,
+                    tsnr_count=tsnr_count,
+                    tsnr_min_samples=TSNR_MIN_SAMPLES,
+                    tsnr_display_max=100.0,
+                )
 
                 if not os.path.isfile(tmp_dashboard_filepath):
                     raise FileNotFoundError(f"Dashboard was not created: {tmp_dashboard_filepath}")
@@ -468,7 +498,11 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     raise ValueError(f"cv2.imread returned None (failed to read image): {dashboard_filepath}")
 
                 if stream_flag == "on":
-                    push_img_to_stream(img, 1600, 900)
+                    push_img_to_stream(
+                        img,
+                        DASHBOARD_PIXEL_WIDTH,
+                        DASHBOARD_PIXEL_HEIGHT,
+                    )
 
                 return dashboard_filepath
             except Exception as e:  # Gracefully skip streaming step this time
@@ -498,11 +532,16 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
     def handle_reset_trigger(filepath):
         """Handle CLOSE-trigger file."""
         logging.info(f"Reset trigger detected : {os.path.basename(filepath)}")
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
 
+        # Queue deletion of .closeQ precedes creation of .closeM, so this final
+        # read observes the complete registration history, including the last
+        # acquisition volume. Give any image-ready volume one last bounded pass.
+        registration_status_path = os.path.join(
+            input_dir, REGISTRATION_STATUS_FILENAME
+        )
+        if os.path.isfile(registration_status_path):
+            tsnr_processor.handle_registration_status(registration_status_path)
+        tsnr_processor.retry_pending(len(state["slice_timings"]) or None)
         # Export motion table BEFORE wiping state
         dashboard_filepath = plot_motion_data(input_dir)
         export_motion_table_csv(output_dir=input_dir)
@@ -514,21 +553,29 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                 if img is not None:
                     logging.info("Displaying reset dashboard frame with banner...")
                     reset_img = mjpeg_server_module.add_banner_to_frame(img)
-                    push_img_to_stream(reset_img, 1600, 900)
+                    push_img_to_stream(
+                        reset_img,
+                        DASHBOARD_PIXEL_WIDTH,
+                        DASHBOARD_PIXEL_HEIGHT,
+                    )
 
         except Exception as e:
             logging.error(f"Failed to display reset frame: {e}")
 
-        # Reset all state
-        # temp_seen = state["seen_files"]
+        # Delete .closeM trigger file to prevent repeated resets and trigger consolidation in Fire-Server
+        try:
+            os.remove(filepath)
+        except Exception as e:
+            logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
+
+        # Reset motion-monitor state
+        time.sleep(3.0)  # Brief sleep to allow output files consolidation
         nonlocal_state = reset_variables()
         state.update(nonlocal_state)
         # Reset the accumulator plus pending/processed volume state. The last
         # tsnr_dashboard.jpg intentionally remains visible after acquisition.
         tsnr_processor.reset()
         logging.info("TSNR: reset on .closeM")
-        # state["seen_files"] = temp_seen     # DEV: re-assign all seen files to prevent repeat processing, for now
-        time.sleep(3.0)  # Brief sleep before monitoring directory again, allow output files to be organized
         logging.info("\n\n---- Motion-monitor reset ----")
         return
 
@@ -596,6 +643,22 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                 # Handle CLOSE trigger
                 if ext == ".closeM":
                     handle_reset_trigger(new_filepath)
+                    continue
+
+                # The queue atomically replaces this durable snapshot. Read all
+                # finalized records because several revisions may be coalesced.
+                if fname == REGISTRATION_STATUS_FILENAME:
+                    try:
+                        stat_result = os.stat(new_filepath)
+                        signature = (
+                            stat_result.st_ino,
+                            stat_result.st_mtime_ns,
+                            stat_result.st_size,
+                        )
+                    except FileNotFoundError:
+                        continue
+                    tsnr_processor.handle_registration_status(new_filepath)
+                    state["registration_status_signature"] = signature
                     continue
 
                 # Handle metadata

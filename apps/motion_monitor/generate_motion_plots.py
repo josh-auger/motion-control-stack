@@ -16,6 +16,121 @@ import logging
 import csv
 import os
 
+try:
+    from .running_tsnr import calculate_mean_tsnr, get_tsnr_display_slices
+except ImportError:  # Support execution from the motion_monitor application directory.
+    from running_tsnr import calculate_mean_tsnr, get_tsnr_display_slices
+
+
+DASHBOARD_PIXEL_WIDTH = 1600
+DASHBOARD_PIXEL_HEIGHT = 1050
+DASHBOARD_DPI = 100
+
+
+def add_tsnr_dashboard_panel(
+    fig,
+    subplot_spec,
+    *,
+    tsnr_volume=None,
+    tsnr_count=0,
+    min_samples=20,
+    display_max=100.0,
+):
+    """Add the shared-orientation raw TSNR panel to a dashboard figure."""
+    if tsnr_count < min_samples:
+        axis = fig.add_subplot(subplot_spec)
+        axis.set_title("raw TSNR", pad=4)
+        axis.axis("off")
+        message = axis.text(
+            0.5,
+            0.5,
+            f"Waiting for TSNR\nN = {tsnr_count} / {min_samples}",
+            transform=axis.transAxes,
+            ha="center",
+            va="center",
+            fontsize=11,
+            color="0.3",
+        )
+        return {"state": "waiting", "axis": axis, "text": message}
+
+    if tsnr_volume is None:
+        axis = fig.add_subplot(subplot_spec)
+        axis.set_title("raw TSNR", pad=4)
+        axis.axis("off")
+        message = axis.text(
+            0.5,
+            0.5,
+            f"TSNR unavailable\nN = {tsnr_count}",
+            transform=axis.transAxes,
+            ha="center",
+            va="center",
+            fontsize=11,
+            color="0.3",
+        )
+        return {"state": "unavailable", "axis": axis, "text": message}
+
+    display_slices = get_tsnr_display_slices(
+        tsnr_volume,
+        display_max=display_max,
+    )
+    mean_tsnr = calculate_mean_tsnr(tsnr_volume)
+
+    title_axis = fig.add_subplot(subplot_spec)
+    title_axis.set_title("raw TSNR", pad=4)
+    title_axis.axis("off")
+    title_axis.set_zorder(-1)
+
+    panel_grid = subplot_spec.subgridspec(
+        2,
+        3,
+        width_ratios=[1, 1, 0.08],
+        hspace=0.015,
+        wspace=0.025,
+    )
+    image_axes = [
+        fig.add_subplot(panel_grid[row, column])
+        for row in range(2)
+        for column in range(2)
+    ]
+    image_artist = None
+    for axis, display_slice in zip(image_axes, display_slices):
+        image_artist = axis.imshow(
+            display_slice,
+            cmap="gray",
+            vmin=0.0,
+            vmax=display_max,
+            interpolation="nearest",
+            aspect="equal",
+        )
+        axis.axis("off")
+
+    overlay = image_axes[2].text(
+        0.04,
+        0.04,
+        f"N = {tsnr_count}\nMean TSNR = {mean_tsnr:.1f}",
+        transform=image_axes[2].transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        fontweight="bold",
+        color="white",
+        bbox=dict(facecolor="black", alpha=0.55, edgecolor="none", pad=2),
+    )
+
+    colorbar_axis = fig.add_subplot(panel_grid[:, 2])
+    colorbar = fig.colorbar(image_artist, cax=colorbar_axis, orientation="vertical")
+    colorbar.ax.tick_params(labelsize=8)
+
+    return {
+        "state": "ready",
+        "title_axis": title_axis,
+        "image_axes": image_axes,
+        "image_artist": image_artist,
+        "colorbar": colorbar,
+        "overlay": overlay,
+        "mean_tsnr": mean_tsnr,
+    }
+
 
 def load_motion_csv(csv_filepath):
     """
@@ -162,7 +277,9 @@ def plot_cumulative_displacement(motion_df, output_filename="", threshold=None):
 
 
 def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", threshold=None, num_expected_volumes=None,
-                          num_moved_volumes=None, host_ip=None, host_port=None, livestream_enabled=False):
+                          num_moved_volumes=None, host_ip=None, host_port=None, livestream_enabled=False,
+                          tsnr_volume=None, tsnr_count=0, tsnr_min_samples=20,
+                          tsnr_display_max=100.0):
     """
     motion_df = pandas DataFrame loaded from the motion CSV file
     Generate a combined motion report figure (framewise displacement, motion summary, motion parameters) to push to a
@@ -179,22 +296,22 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
     motion_flags = motion_df["Motion_flag"]
 
     # --- Figure layout and axes ---
-    target_pixel_width = 1600
-    target_pixel_height = 900
-    target_dpi = 100
+    target_pixel_width = DASHBOARD_PIXEL_WIDTH
+    target_pixel_height = DASHBOARD_PIXEL_HEIGHT
+    target_dpi = DASHBOARD_DPI
     fig = plt.figure(figsize=(target_pixel_width / target_dpi, target_pixel_height / target_dpi),dpi=target_dpi)
     gs = fig.add_gridspec(
-        nrows=3, ncols=4,
-        height_ratios=[1.1, 1.1, 2.2],  # bottom row taller now
-        width_ratios=[3, 3, 3, 2.6],  # right column narrower
-        hspace=0.3, wspace=0.25
+        nrows=3, ncols=2,
+        height_ratios=[1.0, 1.0, 1.15],
+        width_ratios=[3.7, 1.25],
+        hspace=0.30, wspace=0.12,
     )
-    ax_trans = fig.add_subplot(gs[0, 0:3])      # translations (top left)
-    ax_rot = fig.add_subplot(gs[1, 0:3])        # rotations (middle left)
-    ax_status = fig.add_subplot(gs[0:2, 3])     # status panel (top right)
+    ax_trans = fig.add_subplot(gs[0, 0])         # translations (top left)
+    ax_status = fig.add_subplot(gs[0, 1])        # motion summary (top right)
     ax_status.axis("off")
-    ax_disp = fig.add_subplot(gs[2, 0:3])       # framewise displacement
-    ax_sum = fig.add_subplot(gs[2, 3])          # volume motion summary
+    ax_rot = fig.add_subplot(gs[1, 0])           # rotations (middle left)
+    ax_sum = fig.add_subplot(gs[1, 1])           # volume tracker (middle right)
+    ax_disp = fig.add_subplot(gs[2, 0])          # framewise displacement (bottom left)
 
     # --- Translation parameters (top left) ---
     subplot_colors = ['b', 'g', 'r']
@@ -240,7 +357,7 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
     ax_disp.grid(True, alpha=0.4)
     ax_disp.set_xlim(left=0)
 
-    # --- Motion summary (bottom right) ---
+    # --- Volume tracker (middle right) ---
     num_volumes = int(max(volume_index))
     if num_moved_volumes is None:
         num_moved_volumes = int(motion_flags.sum())
@@ -288,11 +405,9 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
         stream_info = (
             "Livestream: Disabled\n\n"
         )
-    
+
     status_text = (
-        stream_info + 
-        "Motion Summary\n"
-        "-------------------------\n"
+        stream_info +
         f"Protocol name:\n{wrapped_protocol}\n\n"
         f"Acquisitions: {len(displacements)}\n"
         f"Motion flags: {motion_flags.sum()}\n"
@@ -311,15 +426,36 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
         fontsize=10,
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="gray")
     )
-    ax_status.set_title("LIVE MOTION MONITOR", pad=4)
+    ax_status.set_title("MOTION MONITOR", pad=4)
+
+    # --- Raw TSNR (bottom right) ---
+    try:
+        add_tsnr_dashboard_panel(
+            fig,
+            gs[2, 1],
+            tsnr_volume=tsnr_volume,
+            tsnr_count=tsnr_count,
+            min_samples=tsnr_min_samples,
+            display_max=tsnr_display_max,
+        )
+    except Exception:
+        logging.exception("Failed to render TSNR dashboard panel.")
+        add_tsnr_dashboard_panel(
+            fig,
+            gs[2, 1],
+            tsnr_volume=None,
+            tsnr_count=max(tsnr_count, tsnr_min_samples),
+            min_samples=tsnr_min_samples,
+            display_max=tsnr_display_max,
+        )
 
     # --- Finalize figure ---
     fig.subplots_adjust(
         left=0.05,
-        right=0.97,
-        bottom=0.07,
-        top=0.95,
-        wspace=0.25,
+        right=0.98,
+        bottom=0.06,
+        top=0.96,
+        wspace=0.12,
         hspace=0.30
     )
     if output_filename:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -60,6 +61,8 @@ class TSNRVolumeProcessor:
         self.accumulator = accumulator if accumulator is not None else RunningTSNR()
         self.pending_volumes: set[int] = set()
         self.processed_volumes: set[int] = set()
+        self.image_ready_volumes: dict[int, np.ndarray] = {}
+        self.motion_ready_volumes: dict[int, dict[str, int]] = {}
         self._pointer_paths: dict[int, str] = {}
         self._protocol_name: str | None = None
         self._last_idle_retry = 0.0
@@ -72,6 +75,8 @@ class TSNRVolumeProcessor:
         self.accumulator.reset()
         self.pending_volumes.clear()
         self.processed_volumes.clear()
+        self.image_ready_volumes.clear()
+        self.motion_ready_volumes.clear()
         self._pointer_paths.clear()
         self._protocol_name = None
         self._last_idle_retry = 0.0
@@ -107,7 +112,80 @@ class TSNRVolumeProcessor:
             self.pending_volumes.add(volume_number)
             self._pointer_paths[volume_number] = pointer_path
 
+        # The reference remains the unconditional initialization sample.
+        if volume_number == 0:
+            self.motion_ready_volumes.setdefault(
+                0, {"registered": 0, "skipped": 0, "failed": 0}
+            )
+
         self.retry_pending(expected_slice_count)
+
+    def handle_registration_status(
+        self,
+        status_path: str | PathLike[str],
+    ) -> bool:
+        """Consume all newly finalized volumes from a durable status snapshot."""
+        try:
+            with open(status_path, "r", encoding="utf-8") as status_file:
+                document = json.load(status_file)
+            if document.get("schema_version") != 1:
+                raise ValueError("unsupported or missing schema_version")
+            volumes = document.get("volumes")
+            if not isinstance(volumes, dict):
+                raise ValueError("volumes must be an object")
+
+            newly_ready: list[int] = []
+            for volume_text, volume_record in volumes.items():
+                if not isinstance(volume_text, str) or not volume_text.isdigit():
+                    raise ValueError(f"invalid volume key: {volume_text!r}")
+                volume_number = int(volume_text)
+                if not isinstance(volume_record, dict):
+                    raise ValueError(f"volume {volume_number} record must be an object")
+                if volume_record.get("registration_finalized") is not True:
+                    continue
+                groups = volume_record.get("groups")
+                if not isinstance(groups, dict) or not groups:
+                    raise ValueError(f"volume {volume_number} groups must be nonempty")
+                counts = {"registered": 0, "skipped": 0, "failed": 0}
+                for group_text, group_record in groups.items():
+                    if not isinstance(group_text, str) or not group_text.isdigit():
+                        raise ValueError(
+                            f"volume {volume_number} has invalid group key {group_text!r}"
+                        )
+                    if not isinstance(group_record, dict):
+                        raise ValueError(
+                            f"volume {volume_number} group {group_text} must be an object"
+                        )
+                    status = group_record.get("status")
+                    if status not in counts:
+                        raise ValueError(
+                            f"volume {volume_number} group {group_text} has invalid status"
+                        )
+                    if status == "registered" and not isinstance(
+                        group_record.get("transform_filename"), str
+                    ):
+                        raise ValueError(
+                            f"volume {volume_number} group {group_text} lacks transform_filename"
+                        )
+                    counts[status] += 1
+
+                if volume_number not in self.motion_ready_volumes:
+                    self.motion_ready_volumes[volume_number] = counts
+                    newly_ready.append(volume_number)
+                    self._logger.info(
+                        "TSNR: volume %d motion ready (%d registered, %d skipped, %d failed)",
+                        volume_number,
+                        counts["registered"],
+                        counts["skipped"],
+                        counts["failed"],
+                    )
+        except Exception as error:
+            self._logger.warning("TSNR: registration status unavailable: %s", error)
+            return False
+
+        for volume_number in sorted(newly_ready):
+            self._maybe_process_volume(volume_number)
+        return True
 
     def retry_pending(self, expected_slice_count: int | None) -> None:
         """Attempt each pending volume once, oldest volume number first."""
@@ -116,34 +194,58 @@ class TSNRVolumeProcessor:
                 self.pending_volumes.discard(volume_number)
                 continue
 
-            try:
-                volume = self._load_volume(volume_number, expected_slice_count)
-                if volume is None:
+            if volume_number not in self.image_ready_volumes:
+                try:
+                    volume = self._load_volume(volume_number, expected_slice_count)
+                    if volume is None:
+                        continue
+                    if (
+                        self.accumulator.mean is not None
+                        and volume.shape != self.accumulator.mean.shape
+                    ):
+                        raise ValueError(
+                            f"assembled shape {volume.shape} does not match reference "
+                            f"shape {self.accumulator.mean.shape}"
+                        )
+                    self.image_ready_volumes[volume_number] = volume
+                    self._logger.info("TSNR: volume %d image ready", volume_number)
+                except Exception as error:
+                    self._logger.warning(
+                        "TSNR: volume %d remains pending: %s", volume_number, error
+                    )
                     continue
 
-                if self.accumulator.mean is not None and volume.shape != self.accumulator.mean.shape:
-                    raise ValueError(
-                        f"assembled shape {volume.shape} does not match reference "
-                        f"shape {self.accumulator.mean.shape}"
-                    )
-                self.accumulator.update(volume)
-            except Exception as error:
-                self._logger.warning(
-                    "TSNR: volume %d remains pending: %s", volume_number, error
-                )
-                continue
+            self._maybe_process_volume(volume_number)
 
-            # Success ordering is deliberate: update first, then mark processed.
-            self.processed_volumes.add(volume_number)
-            self.pending_volumes.discard(volume_number)
-            self._pointer_paths.pop(volume_number, None)
-            item_name = "reference" if volume_number == 0 else f"volume {volume_number}"
-            self._logger.info(
-                "TSNR: %s accumulated (n=%d)", item_name, self.accumulator.count
+    def _maybe_process_volume(self, volume_number: int) -> bool:
+        """Accumulate exactly once after image and registration are both ready."""
+        if volume_number in self.processed_volumes:
+            return False
+        volume = self.image_ready_volumes.get(volume_number)
+        if volume is None or volume_number not in self.motion_ready_volumes:
+            return False
+
+        try:
+            self.accumulator.update(volume)
+        except Exception as error:
+            self._logger.warning(
+                "TSNR: volume %d remains pending: %s", volume_number, error
             )
+            return False
 
-            # Display errors must not make an accumulated volume eligible again.
-            self._update_display(volume.shape[1:])
+        # Success ordering is deliberate: update first, then mark processed.
+        self.processed_volumes.add(volume_number)
+        self.pending_volumes.discard(volume_number)
+        self._pointer_paths.pop(volume_number, None)
+        self.image_ready_volumes.pop(volume_number, None)
+        item_name = "reference" if volume_number == 0 else f"volume {volume_number}"
+        self._logger.info(
+            "TSNR: %s accumulated (n=%d)", item_name, self.accumulator.count
+        )
+
+        # Display errors must not make an accumulated volume eligible again.
+        self._update_display(volume.shape[1:])
+        return True
 
     def retry_pending_if_due(
         self,

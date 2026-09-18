@@ -1,6 +1,7 @@
 """Focused tests for the active motion-monitor TSNR orchestration."""
 
 import logging
+import json
 import os
 import tempfile
 import unittest
@@ -85,12 +86,35 @@ class TSNRIntegrationTests(unittest.TestCase):
             self._write_slice(volume, index, value=value)
         return self._pointer(volume)
 
+    def _motion_ready(self, processor: TSNRVolumeProcessor, *volumes: int) -> None:
+        status_path = os.path.join(self.input_dir, "registration_status.json")
+        document = {
+            "schema_version": 1,
+            "revision": len(volumes),
+            "volumes": {
+                str(volume): {
+                    "registration_finalized": True,
+                    "groups": {
+                        "0": {
+                            "status": "registered",
+                            "transform_filename": f"alignTransform_{volume:04d}.tfm",
+                        }
+                    },
+                }
+                for volume in volumes
+            },
+        }
+        with open(status_path, "w", encoding="utf-8") as status_file:
+            json.dump(document, status_file)
+        self.assertTrue(processor.handle_registration_status(status_path))
+
     def test_incomplete_volume_remains_pending_then_processes_exactly_once(self) -> None:
         processor = self._processor()
         processor.handle_pointer(self._write_reference(0.0), expected_slice_count=None)
         pointer = self._pointer(1)
         self._write_slice(1, 0, center_z=30.0)
         self._write_slice(1, 1, center_z=10.0)
+        self._motion_ready(processor, 1)
 
         processor.handle_pointer(pointer, expected_slice_count=3)
         self.assertEqual(processor.pending_volumes, {1})
@@ -113,6 +137,7 @@ class TSNRIntegrationTests(unittest.TestCase):
         processor = self._processor()
         processor.handle_pointer(self._write_reference(), expected_slice_count=None)
         pointer = self._pointer(2)
+        self._motion_ready(processor, 2)
         for index in (0, 1, 3):
             self._write_slice(2, index)
 
@@ -124,6 +149,7 @@ class TSNRIntegrationTests(unittest.TestCase):
         processor = self._processor()
         processor.handle_pointer(self._write_reference(), expected_slice_count=None)
         pointer = self._pointer(3)
+        self._motion_ready(processor, 3)
         for index in (0, 1):
             self._write_slice(3, index)
         bad_path = os.path.join(
@@ -142,6 +168,7 @@ class TSNRIntegrationTests(unittest.TestCase):
         processor = self._processor(accumulator=FailingAccumulator())
         processor.handle_pointer(self._write_reference(), expected_slice_count=None)
         pointer = self._write_complete_volume(4)
+        self._motion_ready(processor, 4)
 
         processor.handle_pointer(pointer, expected_slice_count=3)
         self.assertEqual(processor.pending_volumes, {4})
@@ -155,6 +182,7 @@ class TSNRIntegrationTests(unittest.TestCase):
         reference_pointer = self._write_reference(1.0)
         processor.handle_pointer(reference_pointer, expected_slice_count=None)
         volume_pointer = self._write_complete_volume(1, value=2.0)
+        self._motion_ready(processor, 1)
         processor.handle_pointer(volume_pointer, expected_slice_count=3)
 
         self.assertEqual(processor.accumulator.count, 2)
@@ -173,18 +201,21 @@ class TSNRIntegrationTests(unittest.TestCase):
         processor.handle_pointer(self._write_reference(1.0), expected_slice_count=None)
         for volume in range(1, 19):
             pointer = self._write_complete_volume(volume, value=float(volume + 1))
+            self._motion_ready(processor, volume)
             processor.handle_pointer(pointer, expected_slice_count=3)
 
         self.assertEqual(processor.accumulator.count, 19)
         self.assertEqual(saved_mosaics, [])
 
         twentieth_pointer = self._write_complete_volume(19, value=20.0)
+        self._motion_ready(processor, 19)
         processor.handle_pointer(twentieth_pointer, expected_slice_count=3)
         self.assertEqual(processor.accumulator.count, 20)
         self.assertEqual(len(saved_mosaics), 1)
         self.assertEqual(saved_mosaics[0].shape, (3, 4))
 
         twenty_first_pointer = self._write_complete_volume(20, value=21.0)
+        self._motion_ready(processor, 20)
         processor.handle_pointer(twenty_first_pointer, expected_slice_count=3)
         self.assertEqual(processor.accumulator.count, 21)
         self.assertEqual(len(saved_mosaics), 2)
@@ -214,7 +245,60 @@ class TSNRIntegrationTests(unittest.TestCase):
         self.assertEqual(processor.accumulator.count, 0)
         self.assertEqual(processor.pending_volumes, set())
         self.assertEqual(processor.processed_volumes, set())
+        self.assertEqual(processor.image_ready_volumes, {})
+        self.assertEqual(processor.motion_ready_volumes, {})
         self.assertTrue(os.path.exists(self.output_path))
+
+    def test_image_ready_waits_for_motion_ready(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer = self._write_complete_volume(1, value=2.0)
+
+        processor.handle_pointer(pointer, expected_slice_count=3)
+        self.assertEqual(processor.accumulator.count, 1)
+        self.assertIn(1, processor.image_ready_volumes)
+        self.assertIn(1, processor.pending_volumes)
+
+        self._motion_ready(processor, 1)
+        self.assertEqual(processor.accumulator.count, 2)
+        self.assertEqual(processor.processed_volumes, {0, 1})
+        self.assertNotIn(1, processor.image_ready_volumes)
+
+    def test_motion_ready_before_image_ready_and_duplicate_reads_are_idempotent(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        self._motion_ready(processor, 2)
+        self._motion_ready(processor, 2)
+        self.assertEqual(processor.accumulator.count, 1)
+
+        pointer = self._write_complete_volume(2, value=3.0)
+        processor.handle_pointer(pointer, expected_slice_count=3)
+        self.assertEqual(processor.accumulator.count, 2)
+        self._motion_ready(processor, 2)
+        processor.handle_pointer(pointer, expected_slice_count=3)
+        self.assertEqual(processor.accumulator.count, 2)
+
+    def test_one_status_read_discovers_multiple_finalized_volumes(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer1 = self._write_complete_volume(1, value=2.0)
+        pointer2 = self._write_complete_volume(2, value=3.0)
+        processor.handle_pointer(pointer1, expected_slice_count=3)
+        processor.handle_pointer(pointer2, expected_slice_count=3)
+
+        self._motion_ready(processor, 1, 2)
+        self.assertEqual(processor.accumulator.count, 3)
+        self.assertEqual(processor.processed_volumes, {0, 1, 2})
+
+    def test_malformed_registration_status_is_nonfatal(self) -> None:
+        processor = self._processor()
+        status_path = os.path.join(self.input_dir, "registration_status.json")
+        with open(status_path, "w", encoding="utf-8") as status_file:
+            status_file.write("{not valid JSON")
+
+        self.assertFalse(processor.handle_registration_status(status_path))
+        self.assertEqual(processor.accumulator.count, 0)
+        self.assertEqual(processor.motion_ready_volumes, {})
 
 
 if __name__ == "__main__":
