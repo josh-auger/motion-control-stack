@@ -242,6 +242,7 @@ def atomic_save_tsnr_image(
             temporary_file.write(encoded.tobytes())
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
+        os.chmod(temporary_path, 0o644)
         os.replace(temporary_path, final_path)
         temporary_path = None
     finally:

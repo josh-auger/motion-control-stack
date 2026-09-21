@@ -260,7 +260,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
     state = reset_variables()
 
     TSNR_MIN_SAMPLES = 10
-    tsnr_output_path = os.path.join(input_dir, "tsnr_dashboard.jpg")
+    tsnr_output_path = os.path.join(input_dir, "tsnr_mosaic.jpg")
     tsnr_processor = TSNRVolumeProcessor(
         input_dir,
         tsnr_output_path,
@@ -573,7 +573,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         nonlocal_state = reset_variables()
         state.update(nonlocal_state)
         # Reset the accumulator plus pending/processed volume state. The last
-        # tsnr_dashboard.jpg intentionally remains visible after acquisition.
+        # tsnr mosaic figure intentionally remains visible after acquisition.
         tsnr_processor.reset()
         logging.info("TSNR: reset on .closeM")
         logging.info("\n\n---- Motion-monitor reset ----")
