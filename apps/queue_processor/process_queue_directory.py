@@ -20,6 +20,7 @@ import time
 import logging
 import argparse
 import subprocess
+import signal
 import SimpleITK as sitk
 import numpy as np
 import pandas as pd
@@ -28,8 +29,10 @@ import json
 from myhelpers_jauger.resample_nrrd_image import resample_nrrd_volume
 try:
     from .registration_status import RegistrationStatusTracker
+    from .persistent_cuda_registration import PersistentCudaRegistrationProcess
 except ImportError:  # Support execution from the queue_processor application directory.
     from registration_status import RegistrationStatusTracker
+    from persistent_cuda_registration import PersistentCudaRegistrationProcess
 
 
 REGISTRATION_STATUS_FILENAME = "registration_status.json"
@@ -126,7 +129,7 @@ def select_input_transform(input_dir, identityTransform_filepath, counter, refer
     return chosen_transform
 
 
-def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransform_filepath, outputTransformLabel, reg_engine):
+def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransform_filepath, outputTransformLabel, reg_engine, persistent_cuda=None):
     """
     Compile all inputs for the sub-process run command to execute registration between the assigned reference volume and
     the specified target image slice(s).
@@ -222,6 +225,28 @@ def run_MIregistration(reference_volume_filepath, target_filepaths, inputTransfo
 
         init_params_string = extract_cuda_initialization(inputTransform_filepath)
         logging.info(f"CUDA initialization parameters : {init_params_string}")
+
+        if persistent_cuda is not None:
+            start_time = time.time()
+            try:
+                persistent_cuda.load_reference(reference_volume_filepath)
+                persistent_cuda.register(
+                    outputTransformLabel, init_params_string.split(), target_filepaths
+                )
+                logging.info(
+                    "CUDA registration call elapsed runtime (sec) : %.10f",
+                    time.time() - start_time,
+                )
+                if not transform_was_produced():
+                    logging.error(
+                        "CUDA registration FAILED. Expected transform was not produced: %s",
+                        expected_transform,
+                    )
+                    return False
+                return True
+            except (OSError, RuntimeError, ValueError) as error:
+                logging.error("CUDA registration FAILED: %s", error)
+                return False
 
         run_command = [
             "/opt/moco/bin/cuda-standalone-registration",
@@ -415,7 +440,7 @@ def extract_cuda_initialization(transform_filepath):
     return init_string
 
 
-def monitor_directory(input_dir, fifo_flag, reg_engine):
+def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
     """Monitor directory for new image files without deleting any."""
     # Initialization
     # -------------------------------------------
@@ -679,6 +704,7 @@ def monitor_directory(input_dir, fifo_flag, reg_engine):
                 input_transform,
                 output_string,
                 reg_engine,
+                persistent_cuda,
             )
         except Exception:
             logging.exception(
@@ -903,9 +929,31 @@ def main():
     fifo_flag = args.fifo if args.fifo is not None else env_fifo
 
     env_reg_engine = os.environ.get("REG_ENGINE", "sms-mi-reg")
+    cuda_execution_mode = os.environ.get("CUDA_EXECUTION_MODE", "standalone")
+    if cuda_execution_mode not in ("standalone", "persistent"):
+        parser.error(
+            "CUDA_EXECUTION_MODE must be 'standalone' or 'persistent' "
+            f"(got {cuda_execution_mode!r})"
+        )
 
     setup_logging(args.input_directory)
-    monitor_directory(args.input_directory, fifo_flag, env_reg_engine)
+    persistent_cuda = None
+    if env_reg_engine == "cuda":
+        logging.info("CUDA registration execution mode: %s", cuda_execution_mode)
+        if cuda_execution_mode == "persistent":
+            try:
+                persistent_cuda = PersistentCudaRegistrationProcess()
+            except (OSError, RuntimeError) as error:
+                logging.error("Persistent CUDA registration startup failed: %s", error)
+                sys.exit(1)
+
+    if persistent_cuda is not None:
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
+    try:
+        monitor_directory(args.input_directory, fifo_flag, env_reg_engine, persistent_cuda)
+    finally:
+        if persistent_cuda is not None:
+            persistent_cuda.close()
 
 if __name__ == "__main__":
     main()

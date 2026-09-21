@@ -23,11 +23,14 @@ MOCO_FLAG="off"
 # Registration engine determines the backend used for image registration ("sms-mi-reg", "cuda")
 REG_ENGINE="cuda"
 
+# CUDA process lifetime ("standalone", "persistent")
+CUDA_EXECUTION_MODE="persistent"
+
 # Registration type determines the grouping of image data (by "slice", "smsgroup", or "volume") 
 REG_TYPE="smsgroup"
 
 # Toggle processing data sequentially ("first-in-first-out" = "on") or only the most recent data (FIFO = "off" = "last-in-first-out")
-FIFO_FLAG="on"
+FIFO_FLAG="off"
 
 # Head radius assumption (mm) for displacement calculations
 HEAD_RADIUS=50
@@ -39,7 +42,7 @@ MOTION_THRESH=0.3
 STREAM_FLAG="off"
 
 # Toggle sending motion report back to scanner in-line display ("on", "off")
-SEND_DASHBOARD_FLAG="on"
+SEND_DASHBOARD_FLAG="off"
 
 
 # Docker Run Command
@@ -54,6 +57,7 @@ docker run --rm -it \
   -e MOCO_FLAG="$MOCO_FLAG" \
   -e FIFO_FLAG="$FIFO_FLAG" \
   -e REG_ENGINE="$REG_ENGINE" \
+  -e CUDA_EXECUTION_MODE="$CUDA_EXECUTION_MODE" \
   -e REG_TYPE="$REG_TYPE" \
   -e HEAD_RADIUS="$HEAD_RADIUS" \
   -e MOTION_THRESH="$MOTION_THRESH" \
