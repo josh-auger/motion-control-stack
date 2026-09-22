@@ -32,6 +32,7 @@ from pprint import pprint
 from convert_transform_for_moco import *
 import json
 from math import floor
+from pointer_file import write_pointer_file_atomically
 
 class handleData:
     # Initiate an iterator to read each item in the connection
@@ -793,9 +794,7 @@ class handleData:
 
         # write all slice header filenames to group pointer file, one per line
         try:
-            with open(group_filepath, 'w') as f:
-                for fname in slice_filenames:
-                    f.write(fname + '\n')
+            write_pointer_file_atomically(group_filepath, slice_filenames)
             logging.info(f"\t\tGroup pointer saved as : {group_filepath}")
         except Exception as e:
             logging.error(f"Failed to save group pointer file: {e}")
@@ -895,8 +894,7 @@ class handleData:
         group_filename = f"{self.protocol_name}_volume_{self.volcount:04d}_group_{groupNo:04d}.txt"
         group_filepath = os.path.join(self.datafolder, group_filename)
         try:
-            with open(group_filepath, 'w') as f:
-                f.write(header_filename + '\n')
+            write_pointer_file_atomically(group_filepath, [header_filename])
             logging.info(f"Saved group pointer file: {group_filepath}")
         except Exception as e:
             logging.error(f"Failed to save group pointer file: {e}")
