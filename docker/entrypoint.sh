@@ -12,6 +12,7 @@ export PYTHONPATH="/opt/shared${PYTHONPATH:+:$PYTHONPATH}"
 # MARS chroot launch will default to use WORKDIR=/tmp/share
 export WORKDIR="${WORKDIR:-/tmp/share}"
 export CUDA_EXECUTION_MODE="${CUDA_EXECUTION_MODE:-standalone}"
+export QUEUE_PROFILE_FLAG="${QUEUE_PROFILE_FLAG:-off}"
 
 # Verify working directory before attempting to launch services
 if [ ! -d "$WORKDIR" ]; then
@@ -58,6 +59,7 @@ if [ "$MODE" = "all" ]; then
   log "  REG_ENGINE=$REG_ENGINE"
   log "  CUDA_EXECUTION_MODE=$CUDA_EXECUTION_MODE"
   log "  FIFO_FLAG=$FIFO_FLAG"
+  log "  QUEUE_PROFILE_FLAG=$QUEUE_PROFILE_FLAG"
   log "  HEAD_RADIUS=$HEAD_RADIUS"
   log "  MOTION_THRESH=$MOTION_THRESH"
   log "  STREAM_FLAG=$STREAM_FLAG"
@@ -180,6 +182,7 @@ elif [ "$MODE" = "queue-processor" ]; then
   log "  REG_ENGINE=$REG_ENGINE"
   log "  CUDA_EXECUTION_MODE=$CUDA_EXECUTION_MODE"
   log "  FIFO_FLAG=$FIFO_FLAG"
+  log "  QUEUE_PROFILE_FLAG=$QUEUE_PROFILE_FLAG"
   # JDA: Keep this single-service path behavior aligned with `all`: it also needs GPU availability checks
   # JDA: after the registration command is migrated to cuda-standalone-registration.
 

@@ -32,6 +32,9 @@ REG_TYPE="smsgroup"
 # Toggle processing data sequentially ("first-in-first-out" = "on") or only the most recent data (FIFO = "off" = "last-in-first-out")
 FIFO_FLAG="off"
 
+# Queue-processor lifecycle profiling ("on", "off"); leave off for normal runs
+QUEUE_PROFILE_FLAG="on"
+
 # Head radius assumption (mm) for displacement calculations
 HEAD_RADIUS=50
 
@@ -56,6 +59,7 @@ docker run --rm -it \
   -e WORKDIR="$WORKDIR" \
   -e MOCO_FLAG="$MOCO_FLAG" \
   -e FIFO_FLAG="$FIFO_FLAG" \
+  -e QUEUE_PROFILE_FLAG="$QUEUE_PROFILE_FLAG" \
   -e REG_ENGINE="$REG_ENGINE" \
   -e CUDA_EXECUTION_MODE="$CUDA_EXECUTION_MODE" \
   -e REG_TYPE="$REG_TYPE" \

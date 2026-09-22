@@ -30,9 +30,11 @@ from myhelpers_jauger.resample_nrrd_image import resample_nrrd_volume
 try:
     from .registration_status import RegistrationStatusTracker
     from .persistent_cuda_registration import PersistentCudaRegistrationProcess
+    from .queue_profile import QueueProfiler
 except ImportError:  # Support execution from the queue_processor application directory.
     from registration_status import RegistrationStatusTracker
     from persistent_cuda_registration import PersistentCudaRegistrationProcess
+    from queue_profile import QueueProfiler
 
 
 REGISTRATION_STATUS_FILENAME = "registration_status.json"
@@ -440,7 +442,8 @@ def extract_cuda_initialization(transform_filepath):
     return init_string
 
 
-def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
+def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
+                      profile_flag="off", cuda_execution_mode="standalone"):
     """Monitor directory for new image files without deleting any."""
     # Initialization
     # -------------------------------------------
@@ -482,13 +485,27 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
         os.path.join(input_dir, REGISTRATION_STATUS_FILENAME),
     )
 
+    def new_profiler():
+        if profile_flag != "on":
+            return None
+        try:
+            return QueueProfiler(input_dir, fifo_flag, reg_engine, cuda_execution_mode)
+        except OSError as error:
+            logging.warning("Queue profiling unavailable: %s", error)
+            return None
+
+    profiler = new_profiler()
+
     # Helper functions
     # -------------------------------------------
     def list_new_files():
         """Return list of valid, non-seen files sorted by modification time,
         ignoring files that disappear during the scan."""
         valid_files = []
-        for f in os.listdir(input_dir):
+        directory_entries = os.listdir(input_dir)
+        if profiler is not None:
+            profiler.directory_entries(len(directory_entries))
+        for f in directory_entries:
             if f == REGISTRATION_STATUS_FILENAME:
                 continue
             # Skip wrong extensions
@@ -507,6 +524,8 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
                 continue
 
             valid_files.append((f, mtime))
+            if profiler is not None and os.path.splitext(f)[1] == ".txt":
+                profiler.observe(f, full_path)
 
         def fifo_order(item):
             filename, mtime = item
@@ -535,16 +554,26 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
 
     def pick_newest_files(new_files):
         """FIFO OFF: keep newest file only, discard older ones."""
+        selection_start_ns = time.perf_counter_ns() if profiler is not None else None
         newest = max(
             new_files,
             key=lambda f: os.path.getmtime(os.path.join(input_dir, f))
         )
+        if profiler is not None:
+            selection_end_ns = time.perf_counter_ns()
+            profiler.selection(selection_start_ns, selection_end_ns, new_files, newest)
         for f in new_files:
             if f != newest:
+                if profiler is not None and os.path.splitext(f)[1] == ".txt":
+                    profiler.decision(f, "skipped_by_lifo", "Old file found. Skipping")
                 logging.info(f"Old file found. Skipping {f}")
                 if os.path.splitext(f)[1] == ".txt":
                     record_skipped_pointer(os.path.join(input_dir, f))
                 state["seen_files"].add(f)
+                if profiler is not None and os.path.splitext(f)[1] == ".txt":
+                    profiler.complete(f)
+        if profiler is not None:
+            profiler.skip_handling(selection_end_ns, time.perf_counter_ns())
         return [newest]
 
     def wait_for_complete_write(filepath, max_checks=200, delay=0.005):
@@ -622,31 +651,52 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
             )
         registration_status.set_expected_groups(volume_number, expected_group_ids)
 
-    def record_group_outcome(volume_number, group_number, status, transform_filename=None):
+    def record_group_outcome(volume_number, group_number, status, transform_filename=None,
+                             profile_filename=None):
         """Record a terminal outcome and publish if it completes the volume."""
-        registration_status.record_group(
-            volume_number,
-            group_number,
-            status,
-            transform_filename=transform_filename,
-        )
+        if profiler is not None and profile_filename is not None:
+            profiler.mark(profile_filename, "status_start_perf_ns")
         try:
-            registration_status.finalize_volume_if_ready(volume_number)
-        except OSError as error:
-            # The in-memory terminal decision remains frozen. A later group or
-            # acquisition-close publication will retry the durable snapshot.
-            logging.error("REG STATUS: atomic publication failed: %s", error)
+            registration_status.record_group(
+                volume_number,
+                group_number,
+                status,
+                transform_filename=transform_filename,
+            )
+            try:
+                registration_status.finalize_volume_if_ready(volume_number)
+            except OSError as error:
+                # The in-memory terminal decision remains frozen. A later group or
+                # acquisition-close publication will retry the durable snapshot.
+                logging.error("REG STATUS: atomic publication failed: %s", error)
+        finally:
+            if profiler is not None and profile_filename is not None:
+                profiler.mark(profile_filename, "status_end_perf_ns")
 
     def record_skipped_pointer(pointer_filepath):
         """Durably represent a pointer intentionally discarded by FIFO-off mode."""
+        profile_filename = os.path.basename(pointer_filepath)
+        if profiler is not None:
+            profiler.mark(profile_filename, "preparation_start_perf_ns")
         try:
             if not wait_for_complete_write(pointer_filepath):
                 raise FileNotFoundError("pointer disappeared before skip was recorded")
             volume_number, group_number = get_counters_from_pointer_file(pointer_filepath)
+            if profiler is not None:
+                profiler.identify(profile_filename, volume_number, group_number)
             target_paths = read_pointer_file(pointer_filepath)
             set_expected_groups(volume_number, group_number, target_paths)
-            record_group_outcome(volume_number, group_number, "skipped")
+            if profiler is not None:
+                profiler.mark(profile_filename, "preparation_end_perf_ns")
+            record_group_outcome(
+                volume_number, group_number, "skipped",
+                profile_filename=profile_filename,
+            )
+            if profiler is not None:
+                profiler.mark(profile_filename, "status_result", "record_attempted")
         except Exception as error:
+            if profiler is not None:
+                profiler.mark(profile_filename, "status_result", "error")
             logging.error(
                 "REG STATUS: failed to record skipped pointer %s: %s",
                 os.path.basename(pointer_filepath),
@@ -681,7 +731,8 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
 
         return identity_transform_path
 
-    def run_registration_batch(input_dir, target_paths, identity_transform_path):
+    def run_registration_batch(input_dir, target_paths, identity_transform_path,
+                               profile_filename=None):
         """Run MI registration for one batch of image files within a single group pointer file."""
         state["regcount"] += 1
         logging.info(f"Running registration call {state['regcount']}")
@@ -694,18 +745,28 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
         # input_transform = identity_transform_path
 
         output_string = f"{state['regcount']:04d}_{state['volcount']:04d}-{state['groupcount']:04d}"
+        if profiler is not None and profile_filename is not None:
+            profiler.identify(
+                profile_filename, state["volcount"], state["groupcount"], output_string
+            )
         # JDA: Carry this registration/volume/group identity into the GPU output filename. Existing consumers
         # JDA: currently discover alignTransform_<regcount>.tfm, so either preserve that exact name or update
         # JDA: maybe_update_reference, fire-server, and motion-monitor together to use the new naming contract.
         try:
-            succeeded = run_MIregistration(
-                state["reference_volume_filepath"],
-                target_paths,
-                input_transform,
-                output_string,
-                reg_engine,
-                persistent_cuda,
-            )
+            if profiler is not None and profile_filename is not None:
+                profiler.mark(profile_filename, "registration_start_perf_ns")
+            try:
+                succeeded = run_MIregistration(
+                    state["reference_volume_filepath"],
+                    target_paths,
+                    input_transform,
+                    output_string,
+                    reg_engine,
+                    persistent_cuda,
+                )
+            finally:
+                if profiler is not None and profile_filename is not None:
+                    profiler.mark(profile_filename, "registration_end_perf_ns")
         except Exception:
             logging.exception(
                 "Registration FAILED for volume %d group %d",
@@ -740,6 +801,7 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
 
     def handle_reset_trigger(filepath):
         """Handle close trigger file."""
+        nonlocal profiler
         logging.info(f"Reset trigger detected : {os.path.basename(filepath)}")
         try:
             registration_status.finalize_all_ready()
@@ -758,6 +820,10 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
 
         # Deletion acknowledges that all observed volumes are terminal and the
         # durable status snapshot has been published.
+        if profiler is not None:
+            profiler.end_scan(time.perf_counter_ns())
+            profiler.close()
+            profiler = None
         try:
             os.remove(filepath)
         except Exception as e:
@@ -803,13 +869,20 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
                 continue
             registration_status.reset_memory()
             state["acquisition_closed"] = False
+            profiler = new_profiler()
 
+        scan_start_ns = time.perf_counter_ns() if profiler is not None else None
         new_files = list_new_files()
+        scan_end_ns = time.perf_counter_ns() if profiler is not None else None
         if not new_files:
+            if profiler is not None:
+                profiler.empty_scan(scan_end_ns - scan_start_ns)
             time.sleep(0.005)
             continue
 
         if new_files:
+            if profiler is not None:
+                profiler.begin_scan(new_files, scan_start_ns, scan_end_ns)
             # Start timer of new session
             if state["begintime"] is None:
                 reset_logging(log_dir)
@@ -824,6 +897,8 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
 
             # Process each new file
             for fname in new_files:
+                if profiler is not None and fname.endswith(".txt"):
+                    profiler.mark(fname, "selected_perf_ns")
                 state["itemcount"] += 1
                 new_filepath = os.path.join(input_dir, fname)
                 ext = os.path.splitext(fname)[1]
@@ -841,14 +916,23 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
                 # Handle pointer file
                 if ext == ".txt":
                     start_time = time.time()
+                    if profiler is not None:
+                        profiler.mark(fname, "preparation_start_perf_ns")
                     if not wait_for_complete_write(new_filepath):
                         state["seen_files"].add(fname)
+                        if profiler is not None:
+                            profiler.decision(fname, "pointer_disappeared", "write_stability_check")
+                            profiler.complete(fname)
                         continue
 
                     # Populate pending target paths with the listed image files in the pointer file
                     update_counters_from_pointer_file(new_filepath)
+                    if profiler is not None:
+                        profiler.identify(fname, state["volcount"], state["groupcount"])
                     target_paths = read_pointer_file(new_filepath)
                     logging.info(f"Added {len(target_paths)} file(s) from {fname} to pending targets.")
+                    if profiler is not None:
+                        profiler.mark(fname, "preparation_end_perf_ns")
 
                     if registration_status.is_finalized(state["volcount"]):
                         logging.warning(
@@ -857,25 +941,42 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
                             fname,
                         )
                         state["seen_files"].add(fname)
+                        if profiler is not None:
+                            profiler.decision(fname, "late_pointer_refused", "finalized_volume")
+                            profiler.complete(fname)
                         continue
 
                     # First pointer file --> reference volume
                     if state["reference_volume_filepath"] is None:
+                        if profiler is not None:
+                            profiler.decision(fname, "reference")
+                            profiler.mark(fname, "reference_setup_start_perf_ns")
                         identity_transform_path = initialize_reference_volume(input_dir, target_paths)
+                        if profiler is not None:
+                            profiler.mark(fname, "reference_setup_end_perf_ns")
                         set_expected_groups(
                             state["volcount"], state["groupcount"], target_paths
                         )
                         identity_filename = os.path.basename(identity_transform_path)
+                        if profiler is not None:
+                            profiler.identify(
+                                fname, state["volcount"], state["groupcount"],
+                                os.path.splitext(identity_filename)[0].removeprefix("alignTransform_"),
+                            )
                         if os.path.isfile(identity_transform_path):
+                            profile_outcome = "reference"
                             record_group_outcome(
                                 state["volcount"],
                                 state["groupcount"],
                                 "registered",
                                 identity_filename,
+                                profile_filename=fname,
                             )
                         else:
+                            profile_outcome = "failed_reference"
                             record_group_outcome(
-                                state["volcount"], state["groupcount"], "failed"
+                                state["volcount"], state["groupcount"], "failed",
+                                profile_filename=fname,
                             )
                     else:
                         try:
@@ -887,21 +988,36 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
                                 "REG STATUS: refusing pointer %s: %s", fname, error
                             )
                             state["seen_files"].add(fname)
+                            if profiler is not None:
+                                profiler.decision(fname, "invalid_pointer", "expected_groups_error")
+                                profiler.complete(fname)
                             continue
+                        if profiler is not None:
+                            profiler.decision(fname, "register")
                         outcome, transform_filename = run_registration_batch(
-                            input_dir, target_paths, identity_transform_path
+                            input_dir, target_paths, identity_transform_path,
+                            profile_filename=fname,
                         )
+                        profile_outcome = outcome
                         record_group_outcome(
                             state["volcount"],
                             state["groupcount"],
                             outcome,
                             transform_filename,
+                            profile_filename=fname,
                         )
                         # Check reference volume status
+                        if profiler is not None:
+                            profiler.mark(fname, "reference_update_start_perf_ns")
                         maybe_update_reference(input_dir, new_filepath)
+                        if profiler is not None:
+                            profiler.mark(fname, "reference_update_end_perf_ns")
 
                     # Mark file as processed
                     state["seen_files"].add(fname)
+                    if profiler is not None:
+                        profiler.mark(fname, "status_result", "record_attempted")
+                        profiler.complete(fname, profile_outcome)
 
                     item_process_time = time.time() - start_time
                     total_process_time = time.time() - state["begintime"]
@@ -916,6 +1032,9 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None):
                     logging.info(f"Total elapsed time (sec) : {total_process_time:.3f}")
                     logging.info(f"Average item processing time (sec) : {avg_item_process_time:.3f}")
                     logging.info(f"===================================")
+
+            if profiler is not None:
+                profiler.end_scan(time.perf_counter_ns())
 
 
 def main():
@@ -935,6 +1054,12 @@ def main():
             "CUDA_EXECUTION_MODE must be 'standalone' or 'persistent' "
             f"(got {cuda_execution_mode!r})"
         )
+    queue_profile_flag = os.environ.get("QUEUE_PROFILE_FLAG", "off")
+    if queue_profile_flag not in ("on", "off"):
+        parser.error(
+            "QUEUE_PROFILE_FLAG must be 'on' or 'off' "
+            f"(got {queue_profile_flag!r})"
+        )
 
     setup_logging(args.input_directory)
     persistent_cuda = None
@@ -950,7 +1075,11 @@ def main():
     if persistent_cuda is not None:
         signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
     try:
-        monitor_directory(args.input_directory, fifo_flag, env_reg_engine, persistent_cuda)
+        monitor_directory(
+            args.input_directory, fifo_flag, env_reg_engine, persistent_cuda,
+            profile_flag=queue_profile_flag,
+            cuda_execution_mode=cuda_execution_mode,
+        )
     finally:
         if persistent_cuda is not None:
             persistent_cuda.close()
