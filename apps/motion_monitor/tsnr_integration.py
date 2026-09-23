@@ -243,9 +243,168 @@ class TSNRVolumeProcessor:
             "TSNR: %s accumulated (n=%d)", item_name, self.accumulator.count
         )
 
+        if volume_number > 0:
+            try:
+                self._retire_volume_files(volume_number)
+            except Exception as error:
+                # Retirement is secondary housekeeping. Never make a successfully
+                # accumulated volume eligible for tSNR processing again.
+                self._logger.warning(
+                    "TSNR: volume %d retirement failed: %s", volume_number, error
+                )
+
         # Display errors must not make an accumulated volume eligible again.
         self._update_display(volume.shape[1:])
         return True
+
+    def _retire_volume_files(self, volume_number: int) -> None:
+        """Move one consumed non-reference volume out of the acquisition root."""
+        if volume_number <= 0:
+            return
+        if self._protocol_name is None:
+            self._logger.warning(
+                "TSNR: volume %d retirement skipped (protocol unavailable)",
+                volume_number,
+            )
+            return
+
+        escaped_protocol = re.escape(self._protocol_name)
+        volume_text = f"{volume_number:04d}"
+        pointer_pattern = re.compile(
+            rf"^{escaped_protocol}_volume_{volume_text}_group_(?P<index>\d{{4}})\.txt$"
+        )
+        header_pattern = re.compile(
+            rf"^{escaped_protocol}_volume_{volume_text}_slice_(?P<index>\d{{4}})\.nhdr$"
+        )
+        raw_pattern = re.compile(
+            rf"^{escaped_protocol}_volume_{volume_text}_slice_(?P<index>\d{{4}})\.raw$"
+        )
+
+        try:
+            names = os.listdir(self.input_dir)
+        except OSError as error:
+            self._logger.warning(
+                "TSNR: volume %d retirement scan failed: %s", volume_number, error
+            )
+            return
+
+        pointers: list[str] = []
+        headers: dict[int, str] = {}
+        raw_files: dict[int, str] = {}
+        for name in names:
+            source_path = os.path.join(self.input_dir, name)
+            if not os.path.isfile(source_path):
+                continue
+            pointer_match = pointer_pattern.fullmatch(name)
+            if pointer_match is not None:
+                pointers.append(name)
+                continue
+            header_match = header_pattern.fullmatch(name)
+            if header_match is not None:
+                headers[int(header_match.group("index"))] = name
+                continue
+            raw_match = raw_pattern.fullmatch(name)
+            if raw_match is not None:
+                raw_files[int(raw_match.group("index"))] = name
+
+        complete_indices = sorted(set(headers) & set(raw_files))
+        if not pointers and not complete_indices:
+            self._logger.warning(
+                "TSNR: volume %d retirement found no complete image-work files",
+                volume_number,
+            )
+            return
+
+        processed_dir = os.path.join(
+            self.input_dir, f"processed_{self._protocol_name}"
+        )
+        try:
+            os.makedirs(processed_dir, exist_ok=True)
+        except OSError as error:
+            self._logger.warning(
+                "TSNR: volume %d retirement directory unavailable: %s",
+                volume_number,
+                error,
+            )
+            return
+
+        moved = {"pointer": 0, "header": 0, "raw": 0}
+
+        def destination_exists(name: str) -> bool:
+            destination_path = os.path.join(processed_dir, name)
+            if not os.path.lexists(destination_path):
+                return False
+            self._logger.warning(
+                "TSNR: retirement collision for %s; source left active", name
+            )
+            return True
+
+        def move_file(name: str, file_type: str) -> bool:
+            source_path = os.path.join(self.input_dir, name)
+            destination_path = os.path.join(processed_dir, name)
+            if destination_exists(name):
+                return False
+            try:
+                os.rename(source_path, destination_path)
+            except OSError as error:
+                self._logger.warning(
+                    "TSNR: failed to retire %s: %s", name, error
+                )
+                return False
+            moved[file_type] += 1
+            return True
+
+        # Publish each detached NRRD into the processed directory raw-first so
+        # a moved header never intentionally precedes its data file. Separate
+        # renames are not transactional, so roll the raw file back when the
+        # associated header move fails and rollback remains possible.
+        for slice_index in complete_indices:
+            header_name = headers[slice_index]
+            raw_name = raw_files[slice_index]
+            if destination_exists(header_name) or destination_exists(raw_name):
+                continue
+            if not move_file(raw_name, "raw"):
+                continue
+            if move_file(header_name, "header"):
+                continue
+
+            moved_raw_path = os.path.join(processed_dir, raw_name)
+            original_raw_path = os.path.join(self.input_dir, raw_name)
+            if os.path.lexists(original_raw_path):
+                self._logger.warning(
+                    "TSNR: could not roll back retired raw file %s; source exists",
+                    raw_name,
+                )
+                continue
+            try:
+                os.rename(moved_raw_path, original_raw_path)
+            except OSError as error:
+                self._logger.warning(
+                    "TSNR: failed to roll back retired raw file %s: %s",
+                    raw_name,
+                    error,
+                )
+            else:
+                moved["raw"] -= 1
+
+        for missing_index in sorted(set(headers) ^ set(raw_files)):
+            unmatched_name = headers.get(missing_index) or raw_files[missing_index]
+            self._logger.warning(
+                "TSNR: incomplete detached NRRD pair left active: %s", unmatched_name
+            )
+
+        # Pointer publication into the archive comes after its image pairs.
+        for pointer_name in sorted(pointers):
+            move_file(pointer_name, "pointer")
+
+        self._logger.info(
+            "Retired volume %d: %d pointers, %d headers, %d raw files -> %s/",
+            volume_number,
+            moved["pointer"],
+            moved["header"],
+            moved["raw"],
+            os.path.basename(processed_dir),
+        )
 
     def retry_pending_if_due(
         self,

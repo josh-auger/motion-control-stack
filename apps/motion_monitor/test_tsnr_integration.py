@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import SimpleITK as sitk
@@ -299,6 +300,194 @@ class TSNRIntegrationTests(unittest.TestCase):
         self.assertFalse(processor.handle_registration_status(status_path))
         self.assertEqual(processor.accumulator.count, 0)
         self.assertEqual(processor.motion_ready_volumes, {})
+
+    def test_successful_nonreference_volume_retires_only_image_work_files(self) -> None:
+        processor = self._processor()
+        reference_pointer = self._write_reference()
+        with open(reference_pointer, "r", encoding="utf-8") as pointer_file:
+            reference_header_name = pointer_file.read().strip()
+        reference_raw_name = os.path.splitext(reference_header_name)[0] + ".raw"
+        processor.handle_pointer(reference_pointer, expected_slice_count=None)
+
+        volume_pointer = self._write_complete_volume(1, value=2.0)
+        second_pointer = self._pointer(1, group=1)
+        transform_name = "alignTransform_0001_0001-0000.tfm"
+        unrelated_name = f"{self.protocol}_volume_0001_notes.txt"
+        upsampled_header_name = (
+            f"{self.protocol}_volume_0000_20260916T120000_upsampled.nhdr"
+        )
+        upsampled_raw_name = (
+            f"{self.protocol}_volume_0000_20260916T120000_upsampled.raw"
+        )
+        for name in (
+            transform_name,
+            unrelated_name,
+            upsampled_header_name,
+            upsampled_raw_name,
+        ):
+            with open(os.path.join(self.input_dir, name), "wb") as output_file:
+                output_file.write(b"leave in acquisition root")
+
+        expected_retired = {
+            os.path.basename(volume_pointer),
+            os.path.basename(second_pointer),
+        }
+        for index in range(3):
+            stem = f"{self.protocol}_volume_0001_slice_{index:04d}"
+            expected_retired.update({f"{stem}.nhdr", f"{stem}.raw"})
+
+        self._motion_ready(processor, 1)
+        processor.handle_pointer(volume_pointer, expected_slice_count=3)
+
+        processed_dir = os.path.join(
+            self.input_dir, f"processed_{self.protocol}"
+        )
+        self.assertTrue(os.path.isdir(processed_dir))
+        self.assertEqual(set(os.listdir(processed_dir)), expected_retired)
+        retired_image = sitk.ReadImage(
+            os.path.join(
+                processed_dir,
+                f"{self.protocol}_volume_0001_slice_0000.nhdr",
+            )
+        )
+        self.assertEqual(retired_image.GetSize(), (4, 3, 1))
+        for name in expected_retired:
+            self.assertFalse(os.path.exists(os.path.join(self.input_dir, name)))
+        for name in (
+            transform_name,
+            unrelated_name,
+            upsampled_header_name,
+            upsampled_raw_name,
+            os.path.basename(reference_pointer),
+            reference_header_name,
+            reference_raw_name,
+        ):
+            self.assertTrue(os.path.exists(os.path.join(self.input_dir, name)), name)
+
+    def test_retirement_waits_for_successful_tsnr_incorporation(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer = self._write_complete_volume(1, value=2.0)
+
+        processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertIn(1, processor.image_ready_volumes)
+        self.assertIn(1, processor.pending_volumes)
+        self.assertTrue(os.path.exists(pointer))
+        self.assertFalse(
+            os.path.exists(os.path.join(self.input_dir, f"processed_{self.protocol}"))
+        )
+
+    def test_pending_load_and_accumulator_failure_leave_files_active(self) -> None:
+        pending_processor = self._processor()
+        pending_processor.handle_pointer(
+            self._write_reference(), expected_slice_count=None
+        )
+        pending_pointer = self._pointer(3)
+        pending_header = self._write_slice(3, 0)
+        pending_raw = os.path.splitext(pending_header)[0] + ".raw"
+        self._motion_ready(pending_processor, 3)
+        pending_processor.handle_pointer(pending_pointer, expected_slice_count=3)
+
+        for path in (pending_pointer, pending_header, pending_raw):
+            self.assertTrue(os.path.exists(path))
+        self.assertFalse(
+            os.path.exists(os.path.join(self.input_dir, f"processed_{self.protocol}"))
+        )
+
+        failing_processor = self._processor(accumulator=FailingAccumulator())
+        failing_processor.handle_pointer(
+            self._pointer(
+                0,
+                contents=f"{self.protocol}_volume_0000_20260916T120000.nhdr\n",
+            ),
+            expected_slice_count=None,
+        )
+        failing_pointer = self._write_complete_volume(4, value=4.0)
+        self._motion_ready(failing_processor, 4)
+        failing_processor.handle_pointer(failing_pointer, expected_slice_count=3)
+
+        self.assertIn(4, failing_processor.pending_volumes)
+        self.assertNotIn(4, failing_processor.processed_volumes)
+        self.assertTrue(os.path.exists(failing_pointer))
+
+    def test_destination_collision_preserves_existing_and_source_pair(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer = self._write_complete_volume(5, value=5.0)
+        collided_header_name = f"{self.protocol}_volume_0005_slice_0001.nhdr"
+        collided_raw_name = f"{self.protocol}_volume_0005_slice_0001.raw"
+        processed_dir = os.path.join(
+            self.input_dir, f"processed_{self.protocol}"
+        )
+        os.makedirs(processed_dir)
+        collided_destination = os.path.join(processed_dir, collided_header_name)
+        with open(collided_destination, "wb") as destination_file:
+            destination_file.write(b"existing acquisition data")
+
+        self._motion_ready(processor, 5)
+        processor.handle_pointer(pointer, expected_slice_count=3)
+
+        with open(collided_destination, "rb") as destination_file:
+            self.assertEqual(destination_file.read(), b"existing acquisition data")
+        self.assertTrue(os.path.exists(os.path.join(self.input_dir, collided_header_name)))
+        self.assertTrue(os.path.exists(os.path.join(self.input_dir, collided_raw_name)))
+
+    def test_retirement_failure_does_not_revert_successful_tsnr_state(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer = self._write_complete_volume(6, value=6.0)
+        self._motion_ready(processor, 6)
+
+        with patch(
+            "apps.motion_monitor.tsnr_integration.os.rename",
+            side_effect=OSError("injected rename failure"),
+        ):
+            processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertEqual(processor.accumulator.count, 2)
+        self.assertIn(6, processor.processed_volumes)
+        self.assertNotIn(6, processor.pending_volumes)
+        self.assertTrue(os.path.exists(pointer))
+
+    def test_retirement_directory_failure_leaves_files_active(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer = self._write_complete_volume(7, value=7.0)
+        processed_path = os.path.join(
+            self.input_dir, f"processed_{self.protocol}"
+        )
+        with open(processed_path, "wb") as blocking_file:
+            blocking_file.write(b"not a directory")
+        self._motion_ready(processor, 7)
+
+        processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertIn(7, processor.processed_volumes)
+        self.assertNotIn(7, processor.pending_volumes)
+        self.assertTrue(os.path.isfile(processed_path))
+        self.assertTrue(os.path.exists(pointer))
+
+    def test_multiple_volumes_retire_sequentially(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+
+        retired_names: set[str] = set()
+        for volume in (1, 2):
+            pointer = self._write_complete_volume(volume, value=float(volume + 1))
+            self._motion_ready(processor, volume)
+            processor.handle_pointer(pointer, expected_slice_count=3)
+            retired_names.add(os.path.basename(pointer))
+            for index in range(3):
+                stem = f"{self.protocol}_volume_{volume:04d}_slice_{index:04d}"
+                retired_names.update({f"{stem}.nhdr", f"{stem}.raw"})
+
+        processed_dir = os.path.join(
+            self.input_dir, f"processed_{self.protocol}"
+        )
+        self.assertTrue(retired_names.issubset(set(os.listdir(processed_dir))))
+        self.assertEqual(processor.processed_volumes, {0, 1, 2})
+        self.assertEqual(processor.accumulator.count, 3)
 
 
 if __name__ == "__main__":
