@@ -19,12 +19,14 @@ try:
         atomic_save_tsnr_image,
         create_tsnr_mosaic,
     )
+    from .retirement_paths import processed_acquisition_directory
 except ImportError:  # Support execution from the motion_monitor application directory.
     from running_tsnr import (  # type: ignore[no-redef]
         RunningTSNR,
         atomic_save_tsnr_image,
         create_tsnr_mosaic,
     )
+    from retirement_paths import processed_acquisition_directory
 
 
 _POINTER_RE = re.compile(
@@ -315,8 +317,8 @@ class TSNRVolumeProcessor:
             )
             return
 
-        processed_dir = os.path.join(
-            self.input_dir, f"processed_{self._protocol_name}"
+        processed_dir = processed_acquisition_directory(
+            self.input_dir, self._protocol_name
         )
         try:
             os.makedirs(processed_dir, exist_ok=True)

@@ -33,6 +33,10 @@ from generate_motion_plots import (
     plot_motion_dashboard
 )
 from tsnr_integration import TSNRVolumeProcessor
+from transform_retirement import (
+    TransformRetirer,
+    retirement_enabled_for_moco_flag,
+)
 
 
 def setup_logging(log_dir):
@@ -259,6 +263,18 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         }
     state = reset_variables()
 
+    moco_flag = os.environ.get("MOCO_FLAG", "off")
+    transform_retirement_enabled = retirement_enabled_for_moco_flag(moco_flag)
+    transform_retirer = TransformRetirer(
+        input_dir,
+        enabled=transform_retirement_enabled,
+    )
+    logging.info(
+        "Transform retirement %s (MOCO_FLAG=%s).",
+        "enabled" if transform_retirement_enabled else "disabled",
+        moco_flag,
+    )
+
     TSNR_MIN_SAMPLES = 10
     tsnr_output_path = os.path.join(input_dir, "tsnr_mosaic.jpg")
     tsnr_processor = TSNRVolumeProcessor(
@@ -391,13 +407,13 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         """Maintain cumulative ledger of calculated framewise displacements between transform pairs."""
         if not os.path.exists(prior_transform_filepath):
             logging.warning(f"Prior transform file no longer exists : {prior_transform_filepath}")
-            return
+            return False
 
         prior_transform = read_transform_as_euler(prior_transform_filepath)
 
         if not os.path.exists(current_transform_filepath):
             logging.warning(f"Current transform file no longer exists : {current_transform_filepath}")
-            return
+            return False
 
         current_transform = read_transform_as_euler(current_transform_filepath)
 
@@ -437,7 +453,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         logging.info(f"Prior Euler parameters ({state['itemcount'] - 1:04d}) : {format_params(prior_params, 4)}")
         logging.info(f"Current Euler parameters ({state['itemcount']:04d}) : {format_params(current_params, 4)}")
         logging.info(f"Framewise displacement (mm) : {framewise_displacement:04f}")
-        return
+        return True
 
     def plot_motion_data(input_dir):
         motion_df = motion_table_to_dataframe(state["motion_table"])
@@ -703,7 +719,13 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     if state["prior_transform"] is None:
                         state["prior_transform"] = new_filepath
 
-                    track_framewise_displacement(new_filepath, state["prior_transform"], head_radius, motion_threshold)
+                    consumed_predecessor = state["prior_transform"]
+                    transform_processed = track_framewise_displacement(
+                        new_filepath,
+                        consumed_predecessor,
+                        head_radius,
+                        motion_threshold,
+                    )
 
                     # Registration remains independent of TSNR. A transform is
                     # only an extra opportunity to retry pointer-observed volumes.
@@ -717,6 +739,14 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
 
                     state["seen_files"].add(fname)
                     state["prior_transform"] = new_filepath
+                    # State now retains the successfully processed successor.
+                    # Archival is best-effort and cannot roll this work back.
+                    transform_retirer.retire_after_success(
+                        transform_processed,
+                        consumed_predecessor,
+                        new_filepath,
+                        state["protocol_name"],
+                    )
 
                     logging.info(f"Uptime (sec) : {time.time() - state['begintime']:.3f}")
                     logging.info("...")
