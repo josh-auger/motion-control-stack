@@ -607,6 +607,8 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
         """Read listed filenames from pointer file."""
         with open(filepath, "r") as f:
             listed = [line.strip() for line in f if line.strip()]
+        if not listed:
+            raise ValueError("pointer contains no target filenames")
         return [os.path.join(input_dir, name) for name in listed]
 
     def get_counters_from_pointer_file(pointer_filepath):
@@ -679,8 +681,6 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
         if profiler is not None:
             profiler.mark(profile_filename, "preparation_start_perf_ns")
         try:
-            if not wait_for_complete_write(pointer_filepath):
-                raise FileNotFoundError("pointer disappeared before skip was recorded")
             volume_number, group_number = get_counters_from_pointer_file(pointer_filepath)
             if profiler is not None:
                 profiler.identify(profile_filename, volume_number, group_number)
@@ -918,18 +918,33 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
                     start_time = time.time()
                     if profiler is not None:
                         profiler.mark(fname, "preparation_start_perf_ns")
-                    if not wait_for_complete_write(new_filepath):
+                    try:
+                        # FIRE publishes final pointer names atomically. Discovery
+                        # of the .txt name is therefore the completeness boundary.
+                        update_counters_from_pointer_file(new_filepath)
+                        if profiler is not None:
+                            profiler.identify(fname, state["volcount"], state["groupcount"])
+                        target_paths = read_pointer_file(new_filepath)
+                    except FileNotFoundError as error:
+                        logging.warning(
+                            "Pointer disappeared before it could be read: %s (%s)",
+                            fname,
+                            error,
+                        )
                         state["seen_files"].add(fname)
                         if profiler is not None:
-                            profiler.decision(fname, "pointer_disappeared", "write_stability_check")
+                            profiler.decision(fname, "pointer_disappeared", "pointer_read")
+                            profiler.complete(fname)
+                        continue
+                    except (OSError, ValueError) as error:
+                        logging.error("Unable to read pointer %s: %s", fname, error)
+                        state["seen_files"].add(fname)
+                        if profiler is not None:
+                            profiler.decision(fname, "invalid_pointer", "pointer_read_error")
                             profiler.complete(fname)
                         continue
 
                     # Populate pending target paths with the listed image files in the pointer file
-                    update_counters_from_pointer_file(new_filepath)
-                    if profiler is not None:
-                        profiler.identify(fname, state["volcount"], state["groupcount"])
-                    target_paths = read_pointer_file(new_filepath)
                     logging.info(f"Added {len(target_paths)} file(s) from {fname} to pending targets.")
                     if profiler is not None:
                         profiler.mark(fname, "preparation_end_perf_ns")

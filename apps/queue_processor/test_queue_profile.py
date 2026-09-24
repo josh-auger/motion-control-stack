@@ -26,6 +26,7 @@ class QueueProfileTests(unittest.TestCase):
             (root / "ref.nhdr").write_text("reference")
             (root / "volume_0000_group_0002.txt").write_text("ref.nhdr\n")
             calls = []
+            sleep_calls = []
 
             def make_reference(_input_dir, _reference, _index, _volume, _group):
                 identity = root / "alignTransform_0000_0000-0002_identity.tfm"
@@ -36,6 +37,11 @@ class QueueProfileTests(unittest.TestCase):
                 newest = root / "volume_0001_group_0001.txt"
                 old.write_text("target0.nhdr\n")
                 newest.write_text("target1.nhdr\n")
+                # Match FIRE's unpublished pointer convention. The final
+                # extension is .tmp, so queue discovery must ignore it.
+                (root / "volume_0001_group_0002.txt.deadbeef.tmp").write_text(
+                    "target1.nhdr\n"
+                )
                 now = time.time()
                 os.utime(old, (now - 2, now - 2))
                 os.utime(newest, (now - 1, now - 1))
@@ -49,6 +55,7 @@ class QueueProfileTests(unittest.TestCase):
                 return True
 
             def fake_sleep(_seconds):
+                sleep_calls.append(_seconds)
                 # The close trigger has been handled and the acquisition reset.
                 if (root / "registration_status.json").exists() and not (root / "done.closeQ").exists():
                     document = json.loads((root / "registration_status.json").read_text())
@@ -70,11 +77,15 @@ class QueueProfileTests(unittest.TestCase):
                     )
 
             self.assertEqual(len(calls), 1)
+            # The only sleep is the idle wait after acquisition close. Final
+            # pointers and LIFO-skipped pointers incur no stability sleep.
+            self.assertEqual(sleep_calls, [0.005])
             self.assertEqual(calls[0][0], "0001_0001-0001")
             self.assertIs(calls[0][1], persistent)
             status = json.loads((root / "registration_status.json").read_text())
             self.assertEqual(status["volumes"]["1"]["groups"]["0"]["status"], "skipped")
             self.assertEqual(status["volumes"]["1"]["groups"]["1"]["status"], "registered")
+            self.assertTrue((root / "volume_0001_group_0002.txt.deadbeef.tmp").is_file())
             item_files = list(root.glob("queue_profile_items_*.csv"))
             scan_files = list(root.glob("queue_profile_scans_*.csv"))
             if profile_flag == "off":
