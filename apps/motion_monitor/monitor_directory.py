@@ -34,8 +34,7 @@ from generate_motion_plots import (
 )
 from tsnr_integration import TSNRVolumeProcessor
 from transform_retirement import (
-    TransformRetirer,
-    retirement_enabled_for_moco_flag,
+    TransformRetirementCoordinator,
 )
 
 
@@ -264,14 +263,13 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
     state = reset_variables()
 
     moco_flag = os.environ.get("MOCO_FLAG", "off")
-    transform_retirement_enabled = retirement_enabled_for_moco_flag(moco_flag)
-    transform_retirer = TransformRetirer(
+    transform_retirer = TransformRetirementCoordinator(
         input_dir,
-        enabled=transform_retirement_enabled,
+        moco_flag=moco_flag,
     )
     logging.info(
-        "Transform retirement %s (MOCO_FLAG=%s).",
-        "enabled" if transform_retirement_enabled else "disabled",
+        "Transform retirement mode=%s (MOCO_FLAG=%s).",
+        transform_retirer.mode,
         moco_flag,
     )
 
@@ -588,6 +586,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         time.sleep(3.0)  # Brief sleep to allow output files consolidation
         nonlocal_state = reset_variables()
         state.update(nonlocal_state)
+        transform_retirer.reset()
         # Reset the accumulator plus pending/processed volume state. The last
         # tsnr mosaic figure intentionally remains visible after acquisition.
         tsnr_processor.reset()

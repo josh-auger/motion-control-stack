@@ -1,6 +1,7 @@
 """Focused tests for monotonic FIRE MOCO transform advancement."""
 
 import csv
+import json
 import os
 from pathlib import Path
 import sys
@@ -14,8 +15,10 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 import handle_data
+import moco_state
 from handle_data import handleData
 from moco_profile import FireMocoProfiler
+from moco_state import FIRE_MOCO_STATE_FILENAME, FireMocoStatePublisher
 from moco_transform_discovery import (
     discover_newest_registration_transform,
     parse_registration_transform_filename,
@@ -58,6 +61,7 @@ def build_handler(directory, connection=None):
     instance.last_consumed_registration_index = None
     instance.last_consumed_transform_filename = None
     instance.moco_profiler = RecordingProfiler()
+    instance.moco_state_publisher = FireMocoStatePublisher(directory)
     instance.refImgCoordFrame = object()
     instance.connection = connection if connection is not None else FakeConnection()
     return instance
@@ -169,6 +173,11 @@ class MocoAdvancementTests(unittest.TestCase):
             self.assertEqual(instance.moco_profiler.rows[-1]["outcome"], "feedback_sent")
             self.assertEqual(path.read_bytes(), original)
             self.assertTrue(path.exists())
+            with open(Path(directory, FIRE_MOCO_STATE_FILENAME)) as stream:
+                published = json.load(stream)
+            self.assertEqual(published["committed_registration_index"], 5)
+            self.assertEqual(published["release_before_registration_index"], 5)
+            self.assertEqual(published["committed_transform_filename"], path.name)
 
     def test_no_new_transform_does_not_reopen_consumed_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -225,6 +234,7 @@ class MocoAdvancementTests(unittest.TestCase):
                     instance.moco_profiler.rows[-1]["outcome"],
                     f"{failure if failure != 'read' else 'transform_read'}_failed",
                 )
+                self.assertFalse(Path(directory, FIRE_MOCO_STATE_FILENAME).exists())
 
     def test_send_failure_is_retryable_and_does_not_commit_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -237,6 +247,7 @@ class MocoAdvancementTests(unittest.TestCase):
             self.assertEqual(instance.frameNumberLookup, [])
             self.assertEqual(instance.framenumber, 0)
             self.assertEqual(instance.moco_profiler.rows[-1]["outcome"], "send_failed")
+            self.assertFalse(Path(directory, FIRE_MOCO_STATE_FILENAME).exists())
 
             self.run_feedback(instance)
             self.assertEqual(instance.last_consumed_registration_index, 105)
@@ -272,6 +283,35 @@ class MocoAdvancementTests(unittest.TestCase):
                 instance.frameNumberLookup[-1]["regTransformFilename"],
                 transform_name(106),
             )
+            published = json.loads(
+                Path(directory, FIRE_MOCO_STATE_FILENAME).read_text()
+            )
+            self.assertEqual(published["committed_registration_index"], 106)
+
+    def test_publication_failure_does_not_roll_back_commit_and_later_catches_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_transform(directory, 105)
+            instance = build_handler(directory)
+
+            with patch.object(
+                moco_state.os,
+                "replace",
+                side_effect=OSError("state publication failed"),
+            ):
+                self.run_feedback(instance)
+
+            self.assertEqual(instance.last_consumed_registration_index, 105)
+            self.assertEqual(len(instance.connection.sent), 1)
+            self.assertFalse(Path(directory, FIRE_MOCO_STATE_FILENAME).exists())
+
+            write_transform(directory, 109)
+            self.run_feedback(instance)
+            published = json.loads(
+                Path(directory, FIRE_MOCO_STATE_FILENAME).read_text()
+            )
+            self.assertEqual(instance.last_consumed_registration_index, 109)
+            self.assertEqual(published["committed_registration_index"], 109)
+            self.assertEqual(published["release_before_registration_index"], 109)
 
     def test_feedback_log_failure_prevents_advancement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -299,6 +339,7 @@ class MocoAdvancementTests(unittest.TestCase):
                 instance.moco_profiler.rows[-1]["outcome"],
                 "feedback_logging_failed",
             )
+            self.assertFalse(Path(directory, FIRE_MOCO_STATE_FILENAME).exists())
 
     def test_transform_files_are_not_moved_deleted_or_rewritten(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -332,10 +373,12 @@ class MocoAdvancementTests(unittest.TestCase):
             with (
                 patch.object(handle_data.h5py, "File", return_value=MagicMock()),
                 patch.object(handle_data, "FireMocoProfiler") as profiler,
+                patch.object(handle_data, "FireMocoStatePublisher") as publisher,
             ):
                 instance = handleData(connection, directory, moco_enabled=False)
 
         profiler.assert_not_called()
+        publisher.assert_not_called()
         self.assertIsNone(instance.moco_profiler)
         self.assertIsNone(instance.last_consumed_registration_index)
 

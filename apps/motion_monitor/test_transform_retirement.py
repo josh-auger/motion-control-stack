@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import tempfile
@@ -8,9 +9,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from apps.motion_monitor.retirement_paths import processed_acquisition_directory
+from apps.motion_monitor.fire_moco_state import FIRE_MOCO_STATE_FILENAME
 from apps.motion_monitor.transform_retirement import (
+    TransformRetirementCoordinator,
     TransformRetirer,
     retirement_enabled_for_moco_flag,
+    retirement_mode_for_moco_flag,
 )
 
 
@@ -49,6 +53,25 @@ class TransformRetirementTests(unittest.TestCase):
         return Path(
             processed_acquisition_directory(self.input_dir, self.protocol)
         ) / "transforms"
+
+    def _coordinator(self, moco_flag: str = "on") -> TransformRetirementCoordinator:
+        return TransformRetirementCoordinator(
+            self.input_dir,
+            moco_flag=moco_flag,
+            logger=self.logger,
+        )
+
+    def _write_fire_state(self, index: int, *, filename_index: int | None = None) -> None:
+        filename_index = index if filename_index is None else filename_index
+        payload = {
+            "schema_version": 1,
+            "committed_registration_index": index,
+            "committed_transform_filename": (
+                f"alignTransform_{filename_index:04d}_0001-0000.tfm"
+            ),
+            "release_before_registration_index": index,
+        }
+        (self.input_dir / FIRE_MOCO_STATE_FILENAME).write_text(json.dumps(payload))
 
     def test_successful_successor_retires_only_actual_predecessor(self) -> None:
         identity = self._transform(0, 0, 44, identity=True)
@@ -217,6 +240,207 @@ class TransformRetirementTests(unittest.TestCase):
             {path.name for path in self._archive().iterdir()},
             {predecessor.name},
         )
+
+    def test_moco_on_missing_or_malformed_state_keeps_candidate_pending(self) -> None:
+        predecessor = self._transform(100, 4, 0)
+        successor = self._transform(101, 4, 1)
+        coordinator = self._coordinator()
+
+        self.assertFalse(
+            coordinator.retire_after_success(
+                True, predecessor, successor, self.protocol
+            )
+        )
+        self.assertEqual(coordinator.pending_registration_indices, (100,))
+        self.assertTrue(predecessor.exists())
+
+        (self.input_dir / FIRE_MOCO_STATE_FILENAME).write_text("{malformed")
+        self.assertFalse(
+            coordinator.retire_after_success(
+                True, predecessor, successor, self.protocol
+            )
+        )
+        self.assertTrue(predecessor.exists())
+
+    def test_fire_anchor_and_newer_candidates_remain_pending(self) -> None:
+        coordinator = self._coordinator()
+        self._write_fire_state(105)
+        anchor = self._transform(105, 5, 0)
+        newer = self._transform(106, 5, 1)
+        successor = self._transform(109, 5, 2)
+
+        self.assertFalse(
+            coordinator.retire_after_success(True, anchor, successor, self.protocol)
+        )
+        self.assertFalse(
+            coordinator.retire_after_success(True, newer, successor, self.protocol)
+        )
+        self.assertEqual(coordinator.pending_registration_indices, (105, 106))
+        self.assertTrue(anchor.exists())
+        self.assertTrue(newer.exists())
+
+    def test_lower_candidate_retires_but_current_transform_stays_active(self) -> None:
+        coordinator = self._coordinator()
+        self._write_fire_state(105)
+        predecessor = self._transform(104, 5, 0)
+        current = self._transform(105, 5, 1)
+
+        self.assertTrue(
+            coordinator.retire_after_success(
+                True, predecessor, current, self.protocol
+            )
+        )
+        self.assertTrue((self._archive() / predecessor.name).exists())
+        self.assertTrue(current.exists())
+
+    def test_pending_candidates_retire_after_later_fire_jump_with_gaps(self) -> None:
+        coordinator = self._coordinator()
+        self._write_fire_state(100)
+        first = self._transform(101, 10, 0)
+        second = self._transform(103, 10, 2)
+        third = self._transform(105, 10, 4)
+        current = self._transform(106, 10, 5)
+
+        for predecessor in (first, second, third):
+            self.assertFalse(
+                coordinator.retire_after_success(
+                    True, predecessor, current, self.protocol
+                )
+            )
+        self.assertEqual(coordinator.pending_registration_indices, (101, 103, 105))
+
+        self._write_fire_state(106)
+        # A later successful monitor event is the deliberate recheck trigger.
+        self.assertFalse(
+            coordinator.retire_after_success(True, current, current, self.protocol)
+        )
+        # The first-observation self-pair is not a consumption event, so force a
+        # real successor and verify all previously consumed gaps are released.
+        later = self._transform(109, 11, 0)
+        self.assertFalse(
+            coordinator.retire_after_success(True, current, later, self.protocol)
+        )
+
+        self.assertEqual(coordinator.pending_registration_indices, (106,))
+        for predecessor in (first, second, third):
+            self.assertTrue((self._archive() / predecessor.name).exists())
+        self.assertTrue(current.exists())
+        self.assertTrue(later.exists())
+
+    def test_identity_processing_failure_and_unexpected_flag_are_conservative(self) -> None:
+        identity = self._transform(0, 0, 44, identity=True)
+        predecessor = self._transform(10, 2, 0)
+        successor = self._transform(11, 2, 1)
+        self._write_fire_state(100)
+        coordinator = self._coordinator()
+
+        self.assertFalse(
+            coordinator.retire_after_success(True, identity, successor, self.protocol)
+        )
+        self.assertFalse(
+            coordinator.retire_after_success(False, predecessor, successor, self.protocol)
+        )
+        self.assertTrue(identity.exists())
+        self.assertTrue(predecessor.exists())
+        self.assertEqual(coordinator.pending_registration_indices, ())
+
+        disabled = self._coordinator("unexpected")
+        self.assertEqual(retirement_mode_for_moco_flag("unexpected"), "disabled")
+        self.assertFalse(
+            disabled.retire_after_success(True, predecessor, successor, self.protocol)
+        )
+        self.assertTrue(predecessor.exists())
+
+    def test_moco_off_path_does_not_require_fire_state(self) -> None:
+        predecessor = self._transform(10, 2, 0)
+        successor = self._transform(11, 2, 1)
+        coordinator = self._coordinator(" OFF ")
+
+        self.assertTrue(
+            coordinator.retire_after_success(
+                True, predecessor, successor, self.protocol
+            )
+        )
+        self.assertTrue((self._archive() / predecessor.name).exists())
+
+    def test_move_failure_and_collision_remain_pending_without_overwrite(self) -> None:
+        coordinator = self._coordinator()
+        self._write_fire_state(100)
+        failed = self._transform(10, 2, 0)
+        current = self._transform(11, 2, 1)
+        with patch(
+            "apps.motion_monitor.transform_retirement.os.rename",
+            side_effect=OSError("injected move failure"),
+        ):
+            self.assertFalse(
+                coordinator.retire_after_success(
+                    True, failed, current, self.protocol
+                )
+            )
+        self.assertEqual(coordinator.pending_registration_indices, (10,))
+        self.assertTrue(failed.exists())
+
+        collision = self._transform(12, 2, 2, contents=b"active")
+        self._archive().mkdir(parents=True, exist_ok=True)
+        destination = self._archive() / collision.name
+        destination.write_bytes(b"archived")
+        self.assertFalse(
+            coordinator.retire_after_success(
+                True, collision, current, self.protocol
+            )
+        )
+        self.assertEqual(destination.read_bytes(), b"archived")
+        self.assertEqual(collision.read_bytes(), b"active")
+        # The next successful monitor event retries the earlier nonfatal move.
+        self.assertTrue((self._archive() / failed.name).exists())
+        self.assertEqual(coordinator.pending_registration_indices, (12,))
+
+    def test_highest_generated_transform_and_mtime_do_not_release_candidates(self) -> None:
+        coordinator = self._coordinator()
+        self._write_fire_state(50)
+        candidate = self._transform(60, 3, 0)
+        current = self._transform(999, 99, 9)
+        os.utime(current, (999999, 999999))
+        (self.input_dir / "registration_status.json").write_text(
+            json.dumps({"highest_successful_registration_index": 999})
+        )
+
+        self.assertFalse(
+            coordinator.retire_after_success(
+                True, candidate, current, self.protocol
+            )
+        )
+        self.assertTrue(candidate.exists())
+        self.assertEqual(coordinator.pending_registration_indices, (60,))
+
+    def test_filename_mismatch_and_regressing_state_delay_retirement(self) -> None:
+        coordinator = self._coordinator()
+        candidate = self._transform(10, 3, 0)
+        current = self._transform(11, 3, 1)
+        self._write_fire_state(100, filename_index=99)
+        self.assertFalse(
+            coordinator.retire_after_success(
+                True, candidate, current, self.protocol
+            )
+        )
+        self.assertTrue(candidate.exists())
+
+        self._write_fire_state(105)
+        released = self._transform(104, 4, 0)
+        later = self._transform(105, 4, 1)
+        self.assertTrue(
+            coordinator.retire_after_success(True, released, later, self.protocol)
+        )
+
+        self._write_fire_state(104)
+        regressed_candidate = self._transform(103, 4, 2)
+        self.assertFalse(
+            coordinator.retire_after_success(
+                True, regressed_candidate, later, self.protocol
+            )
+        )
+        self.assertTrue(regressed_candidate.exists())
+        self.assertIn(103, coordinator.pending_registration_indices)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ import json
 from math import floor
 from pointer_file import write_pointer_file_atomically
 from moco_profile import FireMocoProfiler
+from moco_state import FireMocoStatePublisher
 from moco_transform_discovery import discover_newest_registration_transform
 
 class handleData:
@@ -54,6 +55,7 @@ class handleData:
         self.last_consumed_registration_index = None
         self.last_consumed_transform_filename = None
         self.moco_profiler = None
+        self.moco_state_publisher = None
         self.protocol_name = f"protocol_name"
         self.moco_enabled = moco_enabled
         self.send_dashboard_enabled = send_dashboard_enabled
@@ -75,6 +77,7 @@ class handleData:
             logging.exception(e)
 
         if self.moco_enabled:
+            self.moco_state_publisher = FireMocoStatePublisher(self.datafolder)
             try:
                 self.moco_profiler = FireMocoProfiler(self.datafolder)
                 logging.info("FIRE MOCO profiling enabled: %s", self.moco_profiler.path)
@@ -664,6 +667,15 @@ class handleData:
         self.framenumber = next_frame_number
         self.last_consumed_registration_index = candidate.registration_index
         self.last_consumed_transform_filename = candidate.filename
+        self.publish_moco_state(
+            committed_registration_index=candidate.registration_index,
+            committed_transform_filename=candidate.filename,
+            feedback_frame_number=next_frame_number,
+            trigger_image_identifier=profile["incoming_image_identifier"],
+            trigger_volume=self.volcount,
+            trigger_slice=slice_number,
+            trigger_group=group_number,
+        )
         profile.update({
             "last_consumed_registration_index_after": candidate.registration_index,
             "last_consumed_transform_filename_after": candidate.filename,
@@ -672,6 +684,20 @@ class handleData:
         self.record_moco_profile(profile)
         logging.info(f"Sent MOCO feedback frame number : {self.framenumber} at {timestamp} (ms)")
         return
+
+
+    def publish_moco_state(self, **state) -> bool:
+        """Best-effort publication after FIRE's internal feedback commit."""
+        publisher = getattr(self, "moco_state_publisher", None)
+        if publisher is None:
+            return False
+        try:
+            return publisher.publish(**state)
+        except Exception as error:
+            # Coordination is conservative: stale external state delays
+            # retirement but must not change successful scanner feedback.
+            logging.warning("FIRE MOCO state publication failed: %s", error)
+            return False
 
 
     def record_moco_profile(self, row):
