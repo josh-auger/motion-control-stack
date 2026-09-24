@@ -33,6 +33,8 @@ from convert_transform_for_moco import *
 import json
 from math import floor
 from pointer_file import write_pointer_file_atomically
+from moco_profile import FireMocoProfiler
+from moco_transform_discovery import discover_newest_registration_transform
 
 class handleData:
     # Initiate an iterator to read each item in the connection
@@ -49,6 +51,9 @@ class handleData:
         self.delay = 0.15
         self.framenumber = 0
         self.frameNumberLookup = []
+        self.last_consumed_registration_index = None
+        self.last_consumed_transform_filename = None
+        self.moco_profiler = None
         self.protocol_name = f"protocol_name"
         self.moco_enabled = moco_enabled
         self.send_dashboard_enabled = send_dashboard_enabled
@@ -68,6 +73,14 @@ class handleData:
             self.hf = h5py.File(mrdFilepath,'w')
         except Exception as e:
             logging.exception(e)
+
+        if self.moco_enabled:
+            try:
+                self.moco_profiler = FireMocoProfiler(self.datafolder)
+                logging.info("FIRE MOCO profiling enabled: %s", self.moco_profiler.path)
+            except Exception as error:
+                # Profiling is diagnostic only and must not affect acquisition.
+                logging.warning("FIRE MOCO profiling unavailable: %s", error)
 
     def __iter__(self):
         while not self.is_exhausted:
@@ -90,6 +103,8 @@ class handleData:
                     self.finalize_acquisition_outputs()
                 except Exception:
                     logging.exception("Error finalizing acquisition outputs.")
+
+                self.close_moco_profiler()
 
                 # self.connection.send_close()  # no need to send close message. If socket is open, keep listening
                 self.is_exhausted = True
@@ -192,12 +207,19 @@ class handleData:
                     logging.exception("Error finalizing acquisition outputs.")
 
                 self.connection.send_close()
+                self.close_moco_profiler()
                 self.is_exhausted = True
                 return self.hf
 
 
 
     # ---------- CLASS FUNCTIONS ----------
+
+    def close_moco_profiler(self):
+        """Flush and close optional FIRE MOCO profiling output."""
+        if self.moco_profiler is not None:
+            self.moco_profiler.close()
+
 
     def get_motion_dashboard_filepath(self):
         """Return the deterministic path of the motion monitor's published dashboard."""
@@ -390,47 +412,6 @@ class handleData:
         return D
 
 
-    def get_latest_transform_file(self):
-        """
-        Search data directory for all transform files with extension .tfm and grab the most recently modified file.
-        """
-        # JDA: GPU SVR integration must publish each completed .tfm atomically and only after full validation.
-        # JDA: This consumer currently selects the newest .tfm by mtime, so temporary/partial GPU outputs or
-        # JDA: changed filename conventions could send an incorrect transform back to the scanner.
-        VALID_EXTENSIONS = {'.tfm'}
-        transform_files = []
-        for f in os.listdir(self.datafolder):
-            name, ext = os.path.splitext(f)
-            if ext not in VALID_EXTENSIONS:
-                continue
-            transform_files.append(f)
-
-        if not transform_files:
-            logging.info("No transform file(s) found...")
-            return None, None
-
-        # Sort transform files by modification time
-        transform_files.sort(key=lambda f: os.path.getmtime(os.path.join(self.datafolder, f)))
-        latest_transform_filename = transform_files[-1]
-        latest_transform_filepath = os.path.join(self.datafolder, latest_transform_filename)
-
-        # Check last entry only
-        if self.frameNumberLookup:
-            last_entry = self.frameNumberLookup[-1]
-            if last_entry['regTransformFilename'] == latest_transform_filename:
-                return None, None
-
-        # Read and return latest transform
-        try:
-            latest_transform = sitk.ReadTransform(latest_transform_filepath)
-        except Exception as e:
-            logging.warning(f"Skipping unreadable transform file {latest_transform_filename}: {e}")
-            return None, None
-        logging.info(f"Latest transform file to be sent as moco feedback : {latest_transform_filename}")
-        logging.info(f"\t{latest_transform}")
-        return latest_transform, latest_transform_filename
-
-
     def get_moco_transform_from_image_framenumber(self, ismrmrd_image):
         """
         Find the moco transform corresponding to the image header frame number. This is the transform that was applied
@@ -504,45 +485,203 @@ class handleData:
 
     def package_and_send_moco_feedback(self):
         """
-        Convert the most recent registration transform into the device coordinate frame and then package as a moco
-        feedback struct and send as a message back to the scanner.
+        Select the highest unconsumed registration index and send it as MOCO feedback.
+
+        Explicit consumed state is committed only after feedback transmission returns.
+        Failed candidates remain eligible unless a higher index later supersedes them.
         """
-        versor_transform, versor_transform_filename = self.get_latest_transform_file()
-        if versor_transform is None:
+        slice_number = max(self.sliceNo - 1, 0)
+        group_number = floor(slice_number / self.groupsize)
+        profile = {
+            "incoming_image_identifier": max(self.imageNo - 1, 0),
+            "volume": self.volcount,
+            "slice": slice_number,
+            "group": group_number,
+            "last_consumed_registration_index_before": (
+                self.last_consumed_registration_index
+                if self.last_consumed_registration_index is not None else ""
+            ),
+            "last_consumed_transform_filename_before": (
+                self.last_consumed_transform_filename or ""
+            ),
+            "last_consumed_registration_index_after": (
+                self.last_consumed_registration_index
+                if self.last_consumed_registration_index is not None else ""
+            ),
+            "last_consumed_transform_filename_after": (
+                self.last_consumed_transform_filename or ""
+            ),
+        }
+
+        discovery_start_ns = time.perf_counter_ns()
+        try:
+            discovery = discover_newest_registration_transform(
+                self.datafolder,
+                self.last_consumed_registration_index,
+            )
+        except Exception as error:
+            profile["discovery_selection_ms"] = (
+                time.perf_counter_ns() - discovery_start_ns
+            ) / 1e6
+            profile["outcome"] = "discovery_failed"
+            self.record_moco_profile(profile)
+            logging.warning("FIRE MOCO transform discovery failed: %s", error)
+            return
+
+        profile.update({
+            "root_entry_count": discovery.root_entry_count,
+            "valid_transform_count": discovery.valid_transform_count,
+            "newer_candidate_count": discovery.newer_candidate_count,
+            "discovery_selection_ms": (
+                time.perf_counter_ns() - discovery_start_ns
+            ) / 1e6,
+        })
+
+        candidate = discovery.selected
+        if candidate is None:
+            profile["outcome"] = "no_new_transform"
+            self.record_moco_profile(profile)
             logging.info("No new transform file found. Skipping moco feedback.")
             return
+
+        profile.update({
+            "selected_transform_filename": candidate.filename,
+            "selected_registration_index": candidate.registration_index,
+        })
+        transform_path = os.path.join(self.datafolder, candidate.filename)
+
+        read_start_ns = time.perf_counter_ns()
+        try:
+            versor_transform = sitk.ReadTransform(transform_path)
+        except Exception as error:
+            profile["transform_read_ms"] = (
+                time.perf_counter_ns() - read_start_ns
+            ) / 1e6
+            profile["outcome"] = "transform_read_failed"
+            self.record_moco_profile(profile)
+            logging.warning("Skipping unreadable transform file %s: %s", candidate.filename, error)
+            return
+        profile["transform_read_ms"] = (
+            time.perf_counter_ns() - read_start_ns
+        ) / 1e6
+        logging.info("Latest transform file to be sent as moco feedback : %s", candidate.filename)
+        logging.info("\t%s", versor_transform)
 
         # JDA: Validate the SLIMM GPU transform direction, Euler convention, center, and image coordinate frame
         # JDA: against sms-mi-reg before reusing this MoCo conversion. Do not assume the existing X-flip remains valid.
         # Convert sms-mi-reg alignment transform to device coordinate frame for MOCO (import functions from convert_transform_for_moco.py)
-        moco_transform = convert_transform_for_moco(versor_transform, self.refImgCoordFrame)
+        conversion_start_ns = time.perf_counter_ns()
+        try:
+            moco_transform = convert_transform_for_moco(
+                versor_transform,
+                self.refImgCoordFrame,
+            )
+        except Exception as error:
+            profile["conversion_ms"] = (
+                time.perf_counter_ns() - conversion_start_ns
+            ) / 1e6
+            profile["conversion_package_ms"] = profile["conversion_ms"]
+            profile["outcome"] = "conversion_failed"
+            self.record_moco_profile(profile)
+            logging.exception("Failed to convert transform %s for MOCO feedback.", candidate.filename)
+            return
+        conversion_end_ns = time.perf_counter_ns()
+        profile["conversion_ms"] = (conversion_end_ns - conversion_start_ns) / 1e6
         logging.info(f"Moco transform to be sent to scanner :")
         logging.info(f"\t{moco_transform}")
 
-        # Reformat transform for FIRE send and track frame numbers
-        self.framenumber += 1
+        # Prepare the next frame without committing any FIRE advancement state.
+        next_frame_number = self.framenumber + 1
         timestamp = int(time.time())
-        moco_struct = package_transform_as_datastruct(moco_transform, timestamp, self.framenumber)
+        packaging_start_ns = time.perf_counter_ns()
+        try:
+            moco_struct = package_transform_as_datastruct(
+                moco_transform,
+                timestamp,
+                next_frame_number,
+            )
+        except Exception:
+            packaging_end_ns = time.perf_counter_ns()
+            profile["packaging_ms"] = (packaging_end_ns - packaging_start_ns) / 1e6
+            profile["conversion_package_ms"] = (
+                packaging_end_ns - conversion_start_ns
+            ) / 1e6
+            profile["outcome"] = "packaging_failed"
+            self.record_moco_profile(profile)
+            logging.exception("Failed to package transform %s for MOCO feedback.", candidate.filename)
+            return
+        packaging_end_ns = time.perf_counter_ns()
+        profile["packaging_ms"] = (packaging_end_ns - packaging_start_ns) / 1e6
+        profile["conversion_package_ms"] = (
+            packaging_end_ns - conversion_start_ns
+        ) / 1e6
 
-        # Update global frame number lookup table with current frame number, moco data struct, and affine transform object
-        entry = {'frameNumber': self.framenumber,
+        # Build the in-memory mapping now, but append it only after send succeeds.
+        entry = {'frameNumber': next_frame_number,
                  'mocoStruct': moco_struct,
                  'mocoTransformObject': moco_transform,
-                 'regTransformFilename': versor_transform_filename,
+                 'regTransformFilename': candidate.filename,
                  'regTransformObject': versor_transform }
-        self.frameNumberLookup.append(entry)
 
         # Write moco feedback entry to cumulative log file
         feedback_log_path = os.path.join(self.datafolder, "log_moco_feedback_sent.log")
-        with open(feedback_log_path, 'a') as f:
-            f.write(format_moco_struct(moco_struct) + '\n')
-            f.write(f"from transform: {versor_transform_filename}\n\n")
+        feedback_log_start_ns = time.perf_counter_ns()
+        try:
+            with open(feedback_log_path, 'a') as f:
+                f.write(format_moco_struct(moco_struct) + '\n')
+                f.write(f"from transform: {candidate.filename}\n\n")
+        except Exception:
+            profile["feedback_log_ms"] = (
+                time.perf_counter_ns() - feedback_log_start_ns
+            ) / 1e6
+            profile["outcome"] = "feedback_logging_failed"
+            self.record_moco_profile(profile)
+            logging.exception("Failed to log MOCO feedback for %s.", candidate.filename)
+            return
+        profile["feedback_log_ms"] = (
+            time.perf_counter_ns() - feedback_log_start_ns
+        ) / 1e6
         logging.info(f"MOCO return struct : \n{format_moco_struct(moco_struct)}")
 
         # Send latest moco structure as feedback
-        self.connection.send_feedback("MyMocoFeedbackFIRE", moco_struct)
+        send_start_ns = time.perf_counter_ns()
+        try:
+            self.connection.send_feedback("MyMocoFeedbackFIRE", moco_struct)
+        except Exception:
+            profile["feedback_send_ms"] = (
+                time.perf_counter_ns() - send_start_ns
+            ) / 1e6
+            profile["outcome"] = "send_failed"
+            self.record_moco_profile(profile)
+            logging.exception("Failed to send MOCO feedback for %s.", candidate.filename)
+            return
+        profile["feedback_send_ms"] = (
+            time.perf_counter_ns() - send_start_ns
+        ) / 1e6
+
+        # Application-level commit: send_feedback returned without exception.
+        self.frameNumberLookup.append(entry)
+        self.framenumber = next_frame_number
+        self.last_consumed_registration_index = candidate.registration_index
+        self.last_consumed_transform_filename = candidate.filename
+        profile.update({
+            "last_consumed_registration_index_after": candidate.registration_index,
+            "last_consumed_transform_filename_after": candidate.filename,
+            "outcome": "feedback_sent",
+        })
+        self.record_moco_profile(profile)
         logging.info(f"Sent MOCO feedback frame number : {self.framenumber} at {timestamp} (ms)")
         return
+
+
+    def record_moco_profile(self, row):
+        """Best-effort profiling that cannot participate in feedback decisions."""
+        if self.moco_profiler is None:
+            return
+        try:
+            self.moco_profiler.record(row)
+        except Exception as error:
+            logging.warning("FIRE MOCO profiling failed: %s", error)
 
 
     def get_smsfactor_from_metadata(self):
