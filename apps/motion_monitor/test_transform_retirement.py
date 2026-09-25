@@ -327,6 +327,23 @@ class TransformRetirementTests(unittest.TestCase):
         self.assertTrue(current.exists())
         self.assertTrue(later.exists())
 
+    def test_shutdown_recheck_retires_only_fire_released_pending(self) -> None:
+        coordinator = self._coordinator()
+        self._write_fire_state(100)
+        released = self._transform(101, 10, 0)
+        anchor = self._transform(105, 10, 4)
+        current = self._transform(106, 10, 5)
+        coordinator.retire_after_success(True, released, current, self.protocol)
+        coordinator.retire_after_success(True, anchor, current, self.protocol)
+        self.assertEqual(coordinator.pending_registration_indices, (101, 105))
+
+        self._write_fire_state(105)
+        self.assertEqual(coordinator.retire_pending_released(), 1)
+
+        self.assertTrue((self._archive() / released.name).is_file())
+        self.assertTrue(anchor.is_file())
+        self.assertEqual(coordinator.pending_registration_indices, (105,))
+
     def test_identity_processing_failure_and_unexpected_flag_are_conservative(self) -> None:
         identity = self._transform(0, 0, 44, identity=True)
         predecessor = self._transform(10, 2, 0)

@@ -198,6 +198,17 @@ class TransformRetirementCoordinator:
         self._highest_fire_release_before = None
         self._last_state_error = None
 
+    def retire_pending_released(self) -> int:
+        """Recheck monitor-consumed candidates at the shutdown boundary."""
+        if self.mode != "on" or not self._pending:
+            return 0
+        release_before = self._read_release_before()
+        if release_before is None:
+            return 0
+        pending_before = len(self._pending)
+        self._retire_released_pending(release_before)
+        return pending_before - len(self._pending)
+
     def retire_after_success(
         self,
         processing_succeeded: bool,

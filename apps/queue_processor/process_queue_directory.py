@@ -818,16 +818,12 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
             logging.error("REG STATUS: close publication failed: %s", error)
             return
 
-        # Deletion acknowledges that all observed volumes are terminal and the
-        # durable status snapshot has been published.
+        # Finish profiler and in-memory acquisition teardown before deleting the
+        # marker. Marker deletion is the external DONE acknowledgement to FIRE.
         if profiler is not None:
             profiler.end_scan(time.perf_counter_ns())
             profiler.close()
             profiler = None
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
 
         # # Export motion table BEFORE wiping state
         # export_motion_table_csv(input_dir)
@@ -837,7 +833,14 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
         state.update(nonlocal_state)
         state["acquisition_closed"] = True
         state["closed_at_ns"] = time.time_ns()
-        logging.info("\n\n---- Local-queue-processor reset ----")
+        logging.info(
+            "Queue DONE: terminal status/profiling complete; acknowledging %s",
+            os.path.basename(filepath),
+        )
+        try:
+            os.remove(filepath)
+        except Exception as e:
+            logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
         return
 
 

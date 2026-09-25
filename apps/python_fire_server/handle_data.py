@@ -25,6 +25,7 @@ import constants
 import h5py
 import subprocess
 import SimpleITK as sitk
+from dataclasses import dataclass
 from datetime import datetime
 import time
 from pprint import pprint
@@ -36,6 +37,26 @@ from pointer_file import write_pointer_file_atomically
 from moco_profile import FireMocoProfiler
 from moco_state import FireMocoStatePublisher
 from moco_transform_discovery import discover_newest_registration_transform
+
+
+@dataclass(frozen=True)
+class AcquisitionFinalizationResult:
+    """Summary of one best-effort acquisition consolidation."""
+
+    destination_name: str
+    destination_path: str
+    root_files_moved: int
+    processed_directory_status: str
+    errors: tuple[str, ...]
+
+    @property
+    def success(self) -> bool:
+        return not self.errors
+
+    @property
+    def processed_directory_moved(self) -> bool:
+        return self.processed_directory_status == "moved"
+
 
 class handleData:
     # Initiate an iterator to read each item in the connection
@@ -315,26 +336,144 @@ class handleData:
 
     def consolidate_outputs_in_directory(self, new_subdir_name=None):
         """
-        Move all files (except those with certain file extensions) into a newly created subdirectory. Optionally, the
-        output directory can be specified.
+        Move root outputs and this acquisition's processed tree into savedData.
+
+        Independent moves continue after failures, but sources are never
+        overwritten and partial consolidation is reported explicitly.
         """
         if new_subdir_name is None:
             now = datetime.now()
             new_subdir_name = f"savedData_{now.strftime('%Y%m%dT%H%M%S')}_{self.protocol_name}"
 
         new_subdir_path = os.path.join(self.datafolder, new_subdir_name)
-        os.makedirs(new_subdir_path, exist_ok=True)
+        errors = []
+        root_files_moved = 0
+        if os.path.lexists(new_subdir_path):
+            message = f"Finalization destination already exists: {new_subdir_path}"
+            logging.error(message)
+            return AcquisitionFinalizationResult(
+                destination_name=new_subdir_name,
+                destination_path=new_subdir_path,
+                root_files_moved=0,
+                processed_directory_status="not_attempted",
+                errors=(message,),
+            )
 
-        excluded_exts = ('.hdf5','.closeQ','.closeM')  # files to exclude when moving output files to subdirectory
+        try:
+            os.mkdir(new_subdir_path)
+        except OSError as error:
+            message = (
+                f"Unable to create finalization destination {new_subdir_path}: "
+                f"{error}"
+            )
+            logging.error(message)
+            return AcquisitionFinalizationResult(
+                destination_name=new_subdir_name,
+                destination_path=new_subdir_path,
+                root_files_moved=0,
+                processed_directory_status="not_attempted",
+                errors=(message,),
+            )
+
+        excluded_exts = ('.closeQ', '.closeM')
 
         for fname in os.listdir(self.datafolder):
             fpath = os.path.join(self.datafolder, fname)
             if os.path.isfile(fpath) and not fname.endswith(excluded_exts):
                 new_path = os.path.join(new_subdir_path, fname)
-                os.rename(fpath, new_path)
+                if os.path.lexists(new_path):
+                    message = (
+                        f"Finalization collision; source preserved: {fpath} -> {new_path}"
+                    )
+                    logging.error(message)
+                    errors.append(message)
+                    continue
+                try:
+                    os.rename(fpath, new_path)
+                    root_files_moved += 1
+                except OSError as error:
+                    message = f"Failed to consolidate {fpath} -> {new_path}: {error}"
+                    logging.error(message)
+                    errors.append(message)
 
-        logging.info(f"\tMoved output files into subdirectory : {new_subdir_path}")
-        return new_subdir_name
+        processed_status, processed_error = self.move_processed_acquisition_directory(
+            new_subdir_path
+        )
+        if processed_error is not None:
+            errors.append(processed_error)
+
+        expected_processed_name = f"processed_{self.protocol_name}"
+        for fname in os.listdir(self.datafolder):
+            fpath = os.path.join(self.datafolder, fname)
+            if (
+                fname.startswith("processed_")
+                and fname != expected_processed_name
+                and os.path.isdir(fpath)
+            ):
+                logging.warning(
+                    "Leaving unrelated processed directory outside this acquisition: %s",
+                    fpath,
+                )
+
+        result = AcquisitionFinalizationResult(
+            destination_name=new_subdir_name,
+            destination_path=new_subdir_path,
+            root_files_moved=root_files_moved,
+            processed_directory_status=processed_status,
+            errors=tuple(errors),
+        )
+        if result.success:
+            logging.info(
+                "Finalized acquisition: destination=%s root_files_moved=%d "
+                "processed_directory=%s downstream_completion=queue,monitor",
+                new_subdir_path,
+                root_files_moved,
+                processed_status,
+            )
+        else:
+            logging.error(
+                "Acquisition finalization incomplete: destination=%s "
+                "root_files_moved=%d processed_directory=%s errors=%d",
+                new_subdir_path,
+                root_files_moved,
+                processed_status,
+                len(errors),
+            )
+        return result
+
+
+    def move_processed_acquisition_directory(self, destination_directory):
+        """Move only this protocol's processed tree, without merge/overwrite."""
+        processed_name = f"processed_{self.protocol_name}"
+        source = os.path.join(self.datafolder, processed_name)
+        destination = os.path.join(destination_directory, processed_name)
+
+        if not os.path.isdir(source):
+            logging.info("No processed acquisition directory to consolidate: %s", source)
+            return "missing", None
+        if os.path.lexists(destination):
+            message = (
+                f"Processed-directory collision; source preserved: {source} -> "
+                f"{destination}"
+            )
+            logging.error(message)
+            return "collision", message
+        try:
+            os.rename(source, destination)
+        except OSError as error:
+            message = (
+                f"Failed to consolidate processed directory {source} -> "
+                f"{destination}: {error}"
+            )
+            logging.error(message)
+            return "failed", message
+
+        logging.info(
+            "Moved processed acquisition directory: %s -> %s",
+            source,
+            destination,
+        )
+        return "moved", None
 
 
     def wait_for_close_acknowledgement(self, filepath, timeout=300.0, delay=0.05):
@@ -348,16 +487,37 @@ class handleData:
             time.sleep(delay)
 
 
+    def close_acquisition_file_for_finalization(self):
+        """Flush and close the acquisition HDF5 before root-file movement."""
+        acquisition_file = getattr(self, "hf", None)
+        if acquisition_file is None:
+            return
+        try:
+            acquisition_file.flush()
+            acquisition_file.close()
+        except Exception:
+            logging.exception(
+                "Failed to close acquisition HDF5; refusing final consolidation."
+            )
+            raise
+
+
     def finalize_acquisition_outputs(self):
         """Drain queue and monitor state before consolidating acquisition files."""
+        logging.info("Acquisition close received; requesting queue completion.")
         close_queue_path = self.generate_close_file("closeQ")
         self.wait_for_close_acknowledgement(close_queue_path)
+        logging.info("Queue completion observed: %s", close_queue_path)
 
         # Queue acknowledgement guarantees registration_status.json includes
         # every terminal group decision, including those for the final volume.
+        logging.info("Requesting motion-monitor completion.")
         close_monitor_path = self.generate_close_file("closeM")
         self.wait_for_close_acknowledgement(close_monitor_path)
+        logging.info("Motion-monitor completion observed: %s", close_monitor_path)
 
+        self.close_acquisition_file_for_finalization()
+        logging.info("Downstream completion barrier satisfied; finalization starting.")
         return self.consolidate_outputs_in_directory()
 
 

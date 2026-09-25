@@ -259,6 +259,8 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             "idle_time": 0,
             "final_plot_done": False,
             "registration_status_signature": None,
+            "acquisition_closed": False,
+            "closed_at_ns": None,
         }
     state = reset_variables()
 
@@ -556,6 +558,12 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         if os.path.isfile(registration_status_path):
             tsnr_processor.handle_registration_status(registration_status_path)
         tsnr_processor.retry_pending(len(state["slice_timings"]) or None)
+        retired_at_close = transform_retirer.retire_pending_released()
+        if retired_at_close:
+            logging.info(
+                "TRANSFORM RETIRE: archived %d pending transform(s) at close",
+                retired_at_close,
+            )
         # Export motion table BEFORE wiping state
         dashboard_filepath = plot_motion_data(input_dir)
         export_motion_table_csv(output_dir=input_dir)
@@ -576,22 +584,26 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         except Exception as e:
             logging.error(f"Failed to display reset frame: {e}")
 
-        # Delete .closeM trigger file to prevent repeated resets and trigger consolidation in Fire-Server
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
-
-        # Reset motion-monitor state
-        time.sleep(3.0)  # Brief sleep to allow output files consolidation
+        # Finish all acquisition-local teardown before acknowledging FIRE.
         nonlocal_state = reset_variables()
         state.update(nonlocal_state)
+        state["acquisition_closed"] = True
+        state["closed_at_ns"] = time.time_ns()
         transform_retirer.reset()
         # Reset the accumulator plus pending/processed volume state. The last
         # tsnr mosaic figure intentionally remains visible after acquisition.
         tsnr_processor.reset()
-        logging.info("TSNR: reset on .closeM")
-        logging.info("\n\n---- Motion-monitor reset ----")
+        logging.info(
+            "Motion-monitor DONE: final outputs and teardown complete; "
+            "acknowledging %s",
+            os.path.basename(filepath),
+        )
+        # Deletion is the external DONE acknowledgement. Once it succeeds this
+        # monitor remains frozen until metadata newer than the close appears.
+        try:
+            os.remove(filepath)
+        except Exception as e:
+            logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
         return
 
     # =====================================================================
@@ -612,6 +624,31 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
     # MAIN MONITOR LOOP
     # =====================================================================
     while True:
+        if state["acquisition_closed"]:
+            # FIRE owns consolidation after acknowledgement. Do not process any
+            # old acquisition artifact while it is being moved. A later metadata
+            # file is the existing evidence that a new acquisition has begun.
+            newer_metadata_exists = False
+            for filename in os.listdir(input_dir):
+                if (
+                    os.path.splitext(filename)[1] != ".json"
+                    or filename == REGISTRATION_STATUS_FILENAME
+                ):
+                    continue
+                try:
+                    if (
+                        os.stat(os.path.join(input_dir, filename)).st_mtime_ns
+                        > state["closed_at_ns"]
+                    ):
+                        newer_metadata_exists = True
+                        break
+                except FileNotFoundError:
+                    continue
+            if not newer_metadata_exists:
+                time.sleep(0.005)
+                continue
+            state["acquisition_closed"] = False
+
         new_files = list_new_files()
         if not new_files:
             time.sleep(0.005)
