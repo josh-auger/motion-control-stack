@@ -36,6 +36,8 @@ from tsnr_integration import TSNRVolumeProcessor
 from transform_retirement import (
     TransformRetirementCoordinator,
 )
+from dashboard_profile import DashboardProfiler, dashboard_profiling_enabled
+from dashboard_schedule import PeriodicDashboardSchedule, load_dashboard_interval
 
 
 def setup_logging(log_dir):
@@ -254,7 +256,6 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             "motion_flag_count": 0,
             "volume_motion_flag": 0,
             "volume_motion_count": 0,
-            "last_plotted_volcount": 0,
             "idle_since": None,
             "idle_time": 0,
             "final_plot_done": False,
@@ -263,6 +264,24 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             "closed_at_ns": None,
         }
     state = reset_variables()
+
+    def create_dashboard_profiler():
+        if not dashboard_profiling_enabled():
+            return None
+        try:
+            profiler = DashboardProfiler(input_dir)
+            logging.info("Motion-dashboard profiling enabled: %s", profiler.path)
+            return profiler
+        except OSError as error:
+            # Diagnostics must never prevent motion monitoring from starting.
+            logging.warning("Motion-dashboard profiling unavailable: %s", error)
+            return None
+
+    dashboard_profiler = create_dashboard_profiler()
+
+    dashboard_interval_sec = load_dashboard_interval()
+    dashboard_schedule = PeriodicDashboardSchedule(dashboard_interval_sec)
+    logging.info("Motion dashboard interval: %.3f s", dashboard_interval_sec)
 
     moco_flag = os.environ.get("MOCO_FLAG", "off")
     transform_retirer = TransformRetirementCoordinator(
@@ -456,14 +475,50 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         return True
 
     def plot_motion_data(input_dir):
+        profiler = dashboard_profiler
+        profile_start_ns = time.perf_counter_ns() if profiler is not None else None
+        profile_values = None
+        if profiler is not None:
+            profile_values = {
+                "dashboard_index": profiler.count + 1,
+                "trigger_transform_index": state["itemcount"],
+                "volume": state["volcount"],
+                "group": state["groupcount"],
+                "motion_sample_count": len(state["motion_table"]),
+                "tsnr_count": tsnr_accumulator.count,
+            }
+
+        def profile_phase(name, started_ns):
+            if profile_values is not None:
+                elapsed_ms = (time.perf_counter_ns() - started_ns) / 1e6
+                profile_values[name] = profile_values.get(name, 0.0) + elapsed_ms
+
+        def finish_profile(outcome, dashboard_filepath=""):
+            if profile_values is None:
+                return
+            profile_values["outcome"] = outcome
+            profile_values["dashboard_path"] = dashboard_filepath
+            profile_values["total_ms"] = (
+                time.perf_counter_ns() - profile_start_ns
+            ) / 1e6
+            profiler.record(profile_values)
+
+        phase_start_ns = time.perf_counter_ns() if profiler is not None else None
         motion_df = motion_table_to_dataframe(state["motion_table"])
+        profile_phase("monitor_data_prep_ms", phase_start_ns)
+
+        phase_start_ns = time.perf_counter_ns() if profiler is not None else None
         dashboard_filepath = os.path.join(input_dir, f"motionMonitor_dashboard_{state['protocol_name']}.jpg")
         tmp_dashboard_filepath = os.path.join(input_dir, f".motionMonitor_dashboard_{state['protocol_name']}.tmp.jpg")
+        profile_phase("trigger_setup_ms", phase_start_ns)
         if not motion_df.empty:
             try:
+                phase_start_ns = time.perf_counter_ns() if profiler is not None else None
                 if os.path.exists(tmp_dashboard_filepath):
                     os.remove(tmp_dashboard_filepath)
+                profile_phase("trigger_setup_ms", phase_start_ns)
 
+                phase_start_ns = time.perf_counter_ns() if profiler is not None else None
                 tsnr_volume = None
                 tsnr_count = tsnr_accumulator.count
                 if tsnr_count >= TSNR_MIN_SAMPLES:
@@ -475,6 +530,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                             tsnr_count,
                             error,
                         )
+                profile_phase("tsnr_prepare_ms", phase_start_ns)
 
                 plot_motion_dashboard(
                     motion_df,
@@ -490,12 +546,17 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     tsnr_count=tsnr_count,
                     tsnr_min_samples=TSNR_MIN_SAMPLES,
                     tsnr_display_max=100.0,
+                    profile_timings=profile_values,
                 )
 
+                phase_start_ns = time.perf_counter_ns() if profiler is not None else None
                 if not os.path.isfile(tmp_dashboard_filepath):
                     raise FileNotFoundError(f"Dashboard was not created: {tmp_dashboard_filepath}")
+                profile_phase("output_validate_ms", phase_start_ns)
 
+                phase_start_ns = time.perf_counter_ns() if profiler is not None else None
                 os.replace(tmp_dashboard_filepath, dashboard_filepath)
+                profile_phase("atomic_replace_ms", phase_start_ns)
             except Exception:
                 if os.path.exists(tmp_dashboard_filepath):
                     try:
@@ -503,26 +564,33 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     except OSError:
                         logging.exception("Failed to clean up temporary motion dashboard.")
                 logging.exception("Failed to generate motion dashboard; keeping previous dashboard.")
+                finish_profile("generation_failed", dashboard_filepath)
                 return
 
             # Safe image load and stream push
             try:
+                phase_start_ns = time.perf_counter_ns() if profiler is not None else None
                 if not os.path.exists(dashboard_filepath):
                     raise FileNotFoundError(f"File not found: {dashboard_filepath}")
                 img = cv2.imread(dashboard_filepath)
                 if img is None:
                     raise ValueError(f"cv2.imread returned None (failed to read image): {dashboard_filepath}")
+                profile_phase("published_read_ms", phase_start_ns)
 
                 if stream_flag == "on":
+                    phase_start_ns = time.perf_counter_ns() if profiler is not None else None
                     push_img_to_stream(
                         img,
                         DASHBOARD_PIXEL_WIDTH,
                         DASHBOARD_PIXEL_HEIGHT,
                     )
+                    profile_phase("stream_push_ms", phase_start_ns)
 
+                finish_profile("published", dashboard_filepath)
                 return dashboard_filepath
             except Exception as e:  # Gracefully skip streaming step this time
                 logging.error(f"path='{dashboard_filepath}', error='{e}'")
+                finish_profile("publish_read_or_stream_failed", dashboard_filepath)
                 return
 
     def export_motion_table_csv(output_dir):
@@ -547,6 +615,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
 
     def handle_reset_trigger(filepath):
         """Handle CLOSE-trigger file."""
+        nonlocal dashboard_profiler
         logging.info(f"Reset trigger detected : {os.path.basename(filepath)}")
 
         # Queue deletion of .closeQ precedes creation of .closeM, so this final
@@ -567,6 +636,9 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         # Export motion table BEFORE wiping state
         dashboard_filepath = plot_motion_data(input_dir)
         export_motion_table_csv(output_dir=input_dir)
+        if dashboard_profiler is not None:
+            dashboard_profiler.close()
+            dashboard_profiler = None
 
         # Push final dashboard with reset notification
         try:
@@ -590,6 +662,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         state["acquisition_closed"] = True
         state["closed_at_ns"] = time.time_ns()
         transform_retirer.reset()
+        dashboard_schedule.reset()
         # Reset the accumulator plus pending/processed volume state. The last
         # tsnr mosaic figure intentionally remains visible after acquisition.
         tsnr_processor.reset()
@@ -648,6 +721,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                 time.sleep(0.005)
                 continue
             state["acquisition_closed"] = False
+            dashboard_profiler = create_dashboard_profiler()
 
         new_files = list_new_files()
         if not new_files:
@@ -679,6 +753,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
             if state["begintime"] is None:
                 reset_logging(log_dir)
                 state["begintime"] = time.time()
+                dashboard_schedule.start()
                 logging.info(f"Started monitoring at : {datetime.now()}")
 
             # Reset idle tracking
@@ -768,10 +843,9 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     tsnr_processor.retry_pending(
                         len(state["slice_timings"]) or None,
                     )
-                    # if (state["volcount"] // 5) > (state["last_plotted_volcount"] // 5):    # update dashboard every N volumes
-                    if state["itemcount"] % 20 == 0:
-                        plot_motion_data(input_dir)
-                        state["last_plotted_volcount"] = state["volcount"]
+                    dashboard_schedule.run_if_due(
+                        lambda: plot_motion_data(input_dir)
+                    )
 
                     state["seen_files"].add(fname)
                     state["prior_transform"] = new_filepath

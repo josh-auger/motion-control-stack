@@ -49,6 +49,9 @@ class MotionMonitorShutdownTests(unittest.TestCase):
                 self.assertTrue(retirer.reset.called)
                 raise StopAfterAcknowledgement
 
+            def write_dashboard(*_args, **kwargs):
+                Path(kwargs["output_filename"]).write_bytes(b"dashboard")
+
             with (
                 patch.object(monitor, "TSNRVolumeProcessor", return_value=processor),
                 patch.object(
@@ -57,6 +60,18 @@ class MotionMonitorShutdownTests(unittest.TestCase):
                     return_value=retirer,
                 ),
                 patch.object(monitor, "reset_logging", return_value=None),
+                patch.object(
+                    monitor,
+                    "motion_table_to_dataframe",
+                    return_value=SimpleNamespace(empty=False),
+                ),
+                patch.object(
+                    monitor,
+                    "plot_motion_dashboard",
+                    side_effect=write_dashboard,
+                ) as plot_dashboard,
+                patch.object(monitor.cv2, "imread", return_value=object()),
+                patch.object(monitor, "push_img_to_stream", return_value=None),
                 patch.object(monitor.os, "remove", side_effect=remove_after_teardown),
                 patch.object(monitor.time, "sleep", side_effect=stop_in_closed_state),
             ):
@@ -69,6 +84,8 @@ class MotionMonitorShutdownTests(unittest.TestCase):
             processor.reset.assert_called_once()
             retirer.retire_pending_released.assert_called_once()
             retirer.reset.assert_called_once()
+            plot_dashboard.assert_called_once()
+            self.assertTrue((root / "motionMonitor_dashboard_None.jpg").is_file())
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ import textwrap
 import logging
 import csv
 import os
+import time
 
 try:
     from .running_tsnr import calculate_mean_tsnr, get_tsnr_display_slices
@@ -279,14 +280,25 @@ def plot_cumulative_displacement(motion_df, output_filename="", threshold=None):
 def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", threshold=None, num_expected_volumes=None,
                           num_moved_volumes=None, host_ip=None, host_port=None, livestream_enabled=False,
                           tsnr_volume=None, tsnr_count=0, tsnr_min_samples=20,
-                          tsnr_display_max=100.0):
+                          tsnr_display_max=100.0, profile_timings=None):
     """
     motion_df = pandas DataFrame loaded from the motion CSV file
     Generate a combined motion report figure (framewise displacement, motion summary, motion parameters) to push to a
     live stream of ongoing motion results.
     """
 
-    # --- Extract data from  motion DataFrame ---
+    profile_start_ns = time.perf_counter_ns() if profile_timings is not None else None
+
+    def start_phase():
+        return time.perf_counter_ns() if profile_timings is not None else None
+
+    def finish_phase(name, started_ns):
+        if profile_timings is not None:
+            elapsed_ms = (time.perf_counter_ns() - started_ns) / 1e6
+            profile_timings[name] = profile_timings.get(name, 0.0) + elapsed_ms
+
+    # --- Extract data from motion DataFrame ---
+    phase_start_ns = start_phase()
     rotations_rad = motion_df[["X_rotation(rad)", "Y_rotation(rad)", "Z_rotation(rad)"]].to_numpy()
     rotations = np.degrees(rotations_rad)
     translations = motion_df[["X_translation(mm)", "Y_translation(mm)", "Z_translation(mm)"]].to_numpy()
@@ -294,8 +306,10 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
     cumulative = motion_df["Cumulative_displacement(mm)"].to_numpy()
     volume_index = motion_df["Volume_index"]
     motion_flags = motion_df["Motion_flag"]
+    finish_phase("plot_data_extract_ms", phase_start_ns)
 
     # --- Figure layout and axes ---
+    phase_start_ns = start_phase()
     target_pixel_width = DASHBOARD_PIXEL_WIDTH
     target_pixel_height = DASHBOARD_PIXEL_HEIGHT
     target_dpi = DASHBOARD_DPI
@@ -312,8 +326,10 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
     ax_rot = fig.add_subplot(gs[1, 0])           # rotations (middle left)
     ax_sum = fig.add_subplot(gs[1, 1])           # volume tracker (middle right)
     ax_disp = fig.add_subplot(gs[2, 0])          # framewise displacement (bottom left)
+    finish_phase("figure_create_ms", phase_start_ns)
 
     # --- Translation parameters (top left) ---
+    phase_start_ns = start_phase()
     subplot_colors = ['b', 'g', 'r']
     for i, label in enumerate(['X', 'Y', 'Z']):
         ax_trans.plot(
@@ -323,14 +339,18 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
             alpha=0.75,
             label=f'{label}'
         )
+    finish_phase("plot_population_ms", phase_start_ns)
 
+    phase_start_ns = start_phase()
     ax_trans.set_title("Motion Parameters", pad=4)
     ax_trans.set_ylabel("Translation (mm)")
     ax_trans.grid(True, linestyle='-', linewidth=0.5, color='gray', alpha=0.5)
     ax_trans.set_xlim(left=0)
     ax_trans.legend(loc='upper left')
+    finish_phase("annotation_ms", phase_start_ns)
 
     # --- Rotation parameters (middle left) ---
+    phase_start_ns = start_phase()
     for i, label in enumerate(['X', 'Y', 'Z']):
         ax_rot.plot(
             rotations[:, i],
@@ -339,25 +359,33 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
             alpha=0.75,
             label=f'{label}'
         )
+    finish_phase("plot_population_ms", phase_start_ns)
 
     # ax_rot.set_xlabel("Acquisition Index")
+    phase_start_ns = start_phase()
     ax_rot.set_ylabel("Rotation (deg)")
     ax_rot.grid(True, linestyle='-', linewidth=0.5, color='gray', alpha=0.5)
     ax_rot.set_xlim(left=0)
     ax_rot.legend(loc='upper left')
+    finish_phase("annotation_ms", phase_start_ns)
 
     # --- Framewise displacement (bottom left) ---
+    phase_start_ns = start_phase()
     ax_disp.plot(displacements, marker='o', alpha=0.7, label="Displacement")
     if threshold is not None:
         ax_disp.axhline(threshold, color='r', linestyle='--', label=f"Threshold = {threshold} mm")
+    finish_phase("plot_population_ms", phase_start_ns)
+    phase_start_ns = start_phase()
     ax_disp.set_title("Framewise Displacement", pad=4)
     ax_disp.set_xlabel("Acquisition Index")
     ax_disp.set_ylabel("Displacement (mm)")
     ax_disp.legend(loc='upper left')
     ax_disp.grid(True, alpha=0.4)
     ax_disp.set_xlim(left=0)
+    finish_phase("annotation_ms", phase_start_ns)
 
     # --- Volume tracker (middle right) ---
+    phase_start_ns = start_phase()
     num_volumes = int(max(volume_index))
     if num_moved_volumes is None:
         num_moved_volumes = int(motion_flags.sum())
@@ -373,7 +401,9 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
         f"Motion-free: {num_motion_free_volumes}\n"
         f"Motion-corrupt: {num_moved_volumes}"
     )
+    finish_phase("plot_data_extract_ms", phase_start_ns)
 
+    phase_start_ns = start_phase()
     ax_sum.text(
         0.5, 0.95, text,
         transform=ax_sum.transAxes,
@@ -383,15 +413,21 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
         bbox=dict(facecolor='white', alpha=0.85),
         clip_on=True
     )
+    finish_phase("annotation_ms", phase_start_ns)
+    phase_start_ns = start_phase()
     ax_sum.bar(["Motion-free", "Motion-corrupt"], counts, color=["tab:blue", "tab:orange"])
+    finish_phase("plot_population_ms", phase_start_ns)
+    phase_start_ns = start_phase()
     ax_sum.set_ylim(0, num_expected_volumes * 1.4)
     ax_sum.set_ylabel("N volumes")
     ax_sum.set_title("Volume Tracker", pad=4)
     for i, val in enumerate(counts):
         ax_sum.text(i, val + 0.5, str(val), ha='center', va='bottom')
     ax_sum.grid(axis='y', alpha=0.3)
+    finish_phase("annotation_ms", phase_start_ns)
 
     # --- Status panel (top right) ---
+    phase_start_ns = start_phase()
     wrapped_protocol = "\n".join(textwrap.wrap(protocol_name, width=36)) \
         if protocol_name else "N/A"
 
@@ -416,7 +452,9 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
         f"Motion-free volumes: {num_motion_free_volumes}\n"
         f"Motion-corrupt volumes: {num_moved_volumes}"
     )
+    finish_phase("plot_data_extract_ms", phase_start_ns)
 
+    phase_start_ns = start_phase()
     ax_status.text(
         0.01, 0.99,
         status_text,
@@ -427,8 +465,10 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="gray")
     )
     ax_status.set_title("MOTION MONITOR", pad=4)
+    finish_phase("annotation_ms", phase_start_ns)
 
     # --- Raw TSNR (bottom right) ---
+    phase_start_ns = start_phase()
     try:
         add_tsnr_dashboard_panel(
             fig,
@@ -448,8 +488,10 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
             min_samples=tsnr_min_samples,
             display_max=tsnr_display_max,
         )
+    finish_phase("tsnr_panel_ms", phase_start_ns)
 
     # --- Finalize figure ---
+    phase_start_ns = start_phase()
     fig.subplots_adjust(
         left=0.05,
         right=0.98,
@@ -458,11 +500,20 @@ def plot_motion_dashboard(motion_df, output_filename="", protocol_name="", thres
         wspace=0.12,
         hspace=0.30
     )
+    finish_phase("layout_ms", phase_start_ns)
     if output_filename:
+        phase_start_ns = start_phase()
         plt.savefig(output_filename, dpi=target_dpi, bbox_inches=None,pad_inches=0)
+        finish_phase("savefig_ms", phase_start_ns)
         logging.info(f"Motion dashboard figure saved as : {output_filename}")
+    phase_start_ns = start_phase()
     plt.show(block=False)
     plt.close(fig)
+    finish_phase("cleanup_ms", phase_start_ns)
+    if profile_timings is not None:
+        profile_timings["plot_total_ms"] = (
+            time.perf_counter_ns() - profile_start_ns
+        ) / 1e6
 
 
 if __name__ == "__main__":
