@@ -21,6 +21,7 @@ import logging
 import argparse
 import subprocess
 import signal
+import uuid
 import SimpleITK as sitk
 import numpy as np
 import pandas as pd
@@ -38,6 +39,44 @@ except ImportError:  # Support execution from the queue_processor application di
 
 
 REGISTRATION_STATUS_FILENAME = "registration_status.json"
+
+
+def write_transform_atomically(transform, final_path):
+    """Serialize beside ``final_path`` and publish with one atomic replacement."""
+    final_path = os.fspath(final_path)
+    final_dir = os.path.dirname(final_path)
+    final_name = os.path.basename(final_path)
+    final_stem, _ = os.path.splitext(final_name)
+    staging_path = os.path.join(
+        final_dir,
+        f".{final_stem}.{uuid.uuid4().hex}.partial.tfm",
+    )
+
+    if os.path.lexists(final_path):
+        raise FileExistsError(f"refusing to replace existing transform: {final_path}")
+
+    try:
+        sitk.WriteTransform(transform, staging_path)
+        # Refuse an unexpected output that appeared during serialization. The
+        # queue's labels are unique, so an existing final is never our success.
+        if os.path.lexists(final_path):
+            raise FileExistsError(
+                f"refusing to replace existing transform: {final_path}"
+            )
+        os.replace(staging_path, final_path)
+    except BaseException:
+        try:
+            os.remove(staging_path)
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_error:
+            # Cleanup is best-effort and must not replace the publication error.
+            logging.warning(
+                "Failed to remove transform staging file %s: %s",
+                staging_path,
+                cleanup_error,
+            )
+        raise
 
 
 def setup_logging(log_dir):
@@ -105,7 +144,7 @@ def create_identityTransformFile(input_dir, reference_volume_filepath, indexcoun
     transform = sitk.VersorRigid3DTransform()
     transform.SetIdentity()
     transform.SetCenter(image_center)  # set center of rotation at reference volume center
-    sitk.WriteTransform(transform, transform_filepath)
+    write_transform_atomically(transform, transform_filepath)
     logging.info(f"\tIdentity transform saved as : {transform_filepath}")
     return transform_filepath
 

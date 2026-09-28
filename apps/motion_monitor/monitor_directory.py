@@ -40,6 +40,16 @@ from dashboard_profile import DashboardProfiler, dashboard_profiling_enabled
 from dashboard_schedule import PeriodicDashboardSchedule, load_dashboard_interval
 
 
+_PUBLISHED_TRANSFORM_RE = re.compile(
+    r"^alignTransform_\d+_\d+-\d+(?:_identity)?\.tfm$"
+)
+
+
+def is_published_transform_filename(filename):
+    """Return true only for final queue transform names."""
+    return _PUBLISHED_TRANSFORM_RE.fullmatch(filename) is not None
+
+
 def setup_logging(log_dir):
     """Configure logging to save logs with a timestamped filename in log directory."""
     log_filename = os.path.join(f"{log_dir}/log_motion_monitor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -315,7 +325,12 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         valid_files = []
         for f in os.listdir(input_dir):
             # Skip wrong extensions
-            if os.path.splitext(f)[1] not in VALID_EXTENSIONS:
+            extension = os.path.splitext(f)[1]
+            if extension not in VALID_EXTENSIONS:
+                continue
+            # A staging transform intentionally remains a valid .tfm for the
+            # writer, but it is not a consumer-visible publication event.
+            if extension == ".tfm" and not is_published_transform_filename(f):
                 continue
             # Skip files that have already been processed
             if f in state["seen_files"] and f != REGISTRATION_STATUS_FILENAME:
@@ -822,10 +837,6 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                         get_slice_timings_from_metadata(metadata_object)
                         get_protocol_name_from_metadata(metadata_object)
                         get_repetitions_from_metadata(metadata_object)
-
-                    if not wait_for_complete_write(new_filepath):
-                        state["seen_files"].add(fname)
-                        continue
 
                     if state["prior_transform"] is None:
                         state["prior_transform"] = new_filepath

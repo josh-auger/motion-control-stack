@@ -95,6 +95,7 @@ class TransformFilenameTests(unittest.TestCase):
             "alignTransform_x001_0001-0000.tfm",
             "foo.tfm",
             "alignTransform_0001_0001-0000.tfm.tmp",
+            ".alignTransform_0001_0001-0000.deadbeef.partial.tfm",
         )
         for filename in invalid:
             with self.subTest(filename=filename):

@@ -141,6 +141,21 @@ class TransformRetirementTests(unittest.TestCase):
         self.assertTrue(current.is_file())
         self.assertFalse(self._archive().exists())
 
+    def test_staging_transform_is_never_retired(self) -> None:
+        staging = self.input_dir / (
+            ".alignTransform_0001_0001-0000.token.partial.tfm"
+        )
+        staging.write_bytes(b"partial")
+        successor = self._transform(2, 1, 1)
+
+        retired = self._retirer().retire_after_success(
+            True, staging, successor, self.protocol
+        )
+
+        self.assertFalse(retired)
+        self.assertTrue(staging.is_file())
+        self.assertFalse(self._archive().exists())
+
     def test_processing_failure_leaves_predecessor_active(self) -> None:
         predecessor = self._transform(1, 1, 0)
         successor = self._transform(2, 1, 1)
