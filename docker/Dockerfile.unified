@@ -1,3 +1,6 @@
+ARG SLIMM_MARS_IMAGE=slimm-v3:mars-cuda11.6-sm86
+FROM ${SLIMM_MARS_IMAGE} AS slimm-mars
+
 FROM shared-base-build:devel AS base
 
 ARG THREADS=1
@@ -153,7 +156,7 @@ RUN cd /usr/src/moco && \
     cmake -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX=/opt/moco \
           . && \
-    make -j${THREADS} && \
+    make -j${THREADS} sms-mi-reg && \
     mkdir -p /opt/moco/bin && \
     cp /usr/src/moco/sms-mi-reg /opt/moco/bin/
 
@@ -163,9 +166,9 @@ RUN cp /opt/code/SLIMM-v3/build/cuda-standalone-registration \
 
 ENV MOCO_DIR=/opt/moco/lib/cmake/moco
 
-# FINAL RUNTIME IMAGE
+# COMMON RUNTIME IMAGE
 # ============================================================
-FROM shared-base-build:runtime AS runtime
+FROM shared-base-build:runtime AS runtime-base
 
 # runtime environment
 # ENV LD_LIBRARY_PATH=/opt/itk/lib:/opt/nlopt/lib:/opt/moco/lib:${LD_LIBRARY_PATH}
@@ -198,3 +201,16 @@ RUN chmod +x /entrypoint.sh
 WORKDIR /opt/apps/fire_server
 
 ENTRYPOINT ["/entrypoint.sh"]
+
+# MARS RUNTIME IMAGE (CUDA 11.6 / sm_86 deployment artifacts)
+# ============================================================
+FROM runtime-base AS runtime-mars
+
+RUN mkdir -p /opt/moco/lib
+COPY --from=slimm-mars /opt/slimm/build/cuda-standalone-registration \
+    /opt/moco/bin/cuda-standalone-registration
+COPY --from=slimm-mars /usr/lib/x86_64-linux-gnu/libnlopt_cxx.so.0.10.0 \
+    /opt/moco/lib/libnlopt_cxx.so.0
+
+# Preserve the existing CUDA 13.x development/runtime build as the default.
+FROM runtime-base AS runtime

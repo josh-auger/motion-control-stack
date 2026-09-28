@@ -6,6 +6,7 @@ shift || true
 
 # Configure Python module search path to include /shared directory
 export PYTHONPATH="/opt/shared${PYTHONPATH:+:$PYTHONPATH}"
+export LD_LIBRARY_PATH="/opt/moco/lib:/opt/nlopt/lib:/opt/ace/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # Set working directory for all generated outputs
 # Docker launcher should override default to use WORKDIR=/data
