@@ -16,10 +16,11 @@ if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 import monitor_directory as monitor
+from apps.python_fire_server.pointer_file import write_pointer_file_atomically
 from monitor_directory import is_published_transform_filename
 
 
-class StopInPointerCompletenessWait(Exception):
+class StopAfterPointerProcessing(Exception):
     pass
 
 
@@ -128,22 +129,49 @@ class TransformPublicationFilterTests(unittest.TestCase):
             with self.subTest(producer=producer):
                 self._assert_published_transform_bypasses_wait(filename, transform)
 
-    def test_pointer_still_executes_completeness_wait(self):
+    def test_atomically_published_pointer_bypasses_wait_and_reaches_tsnr(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            raw = root / "test_volume_0001_slice_0000.raw"
+            header = root / "test_volume_0001_slice_0000.nhdr"
             pointer = root / "test_volume_0001_group_0000.txt"
-            pointer.write_text("published pointer")
+            raw.write_bytes(b"complete image payload")
+            header.write_text(
+                "NRRD0004\n"
+                "type: uchar\n"
+                "dimension: 3\n"
+                "sizes: 1 1 1\n"
+                "encoding: raw\n"
+                f"data file: {raw.name}\n"
+            )
+            write_pointer_file_atomically(pointer, [header.name])
+            temporary_pointer = root / f"{pointer.name}.deadbeef.tmp"
+            temporary_pointer.write_text("not-yet-published.nhdr\n")
+            tsnr_processor = MagicMock()
+            tsnr_processor.handle_pointer.side_effect = StopAfterPointerProcessing
 
             with patch.object(monitor, "reset_logging", return_value=None), \
                  patch.object(
+                     monitor,
+                     "TSNRVolumeProcessor",
+                     return_value=tsnr_processor,
+                 ), \
+                 patch.object(
                      monitor.time,
                      "sleep",
-                     side_effect=StopInPointerCompletenessWait,
+                     side_effect=AssertionError("published pointer entered wait"),
                  ) as sleep:
-                with self.assertRaises(StopInPointerCompletenessWait):
+                with self.assertRaises(StopAfterPointerProcessing):
                     monitor.monitor_directory(root, 50, 1.0, 5000, "off")
 
-            sleep.assert_called_once_with(0.005)
+            sleep.assert_not_called()
+            tsnr_processor.handle_pointer.assert_called_once_with(
+                os.fspath(pointer),
+                None,
+            )
+            self.assertEqual(pointer.read_text(), f"{header.name}\n")
+            self.assertEqual(raw.read_bytes(), b"complete image payload")
+            self.assertTrue(temporary_pointer.is_file())
 
     def test_rejected_tfm_files_never_enter_transform_processing(self):
         rejected_names = (

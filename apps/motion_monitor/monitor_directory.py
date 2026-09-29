@@ -808,13 +808,11 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
                     store_metadata_filepath(new_filepath)
                     continue
 
-                # A stable FIRE group pointer is the primary TSNR trigger.
-                # Every group pointer makes one idempotent completeness attempt;
-                # no assumption is made about which group number is final.
+                # FIRE publishes each final group pointer atomically after its
+                # referenced payload is ready. Every pointer makes one idependent
+                # whole-volume attempt; no assumption is made about which group
+                # number is final.
                 if ext == ".txt":
-                    if not wait_for_complete_write(new_filepath):
-                        state["seen_files"].add(fname)
-                        continue
                     if not state["slice_timings"] and state["metadata_filepath"]:
                         try:
                             metadata_object = load_metadata_from_json(state["metadata_filepath"])
