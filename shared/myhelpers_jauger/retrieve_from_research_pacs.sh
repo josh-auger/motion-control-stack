@@ -1,7 +1,25 @@
 #!/bin/bash
 
-MRN=6166089
-StudyDate=20260709
+# Example usage: ./shared/myhelpers_jauger/retrieve_from_research_pacs.sh 71451428 20260921
+
+usage() {
+  echo "Usage: $0 <MRN> <StudyDate>" >&2
+  echo "  StudyDate must use YYYYMMDD format." >&2
+}
+
+if [[ $# -ne 2 ]]; then
+  usage
+  exit 2
+fi
+
+MRN="$1"
+StudyDate="$2"
+
+if [[ ! ${StudyDate} =~ ^[0-9]{8}$ ]]; then
+  echo "Error: StudyDate must be an 8-digit date in YYYYMMDD format." >&2
+  usage
+  exit 2
+fi
 
 # Pull data from Research Synapse:
 sudo docker run --rm -it -u $(id -u):$(id -g) \
@@ -23,5 +41,4 @@ sudo docker run --rm -u $(id -u):$(id -g) -v "`pwd`":/data crl/dicom-tools \
   dicom_tree_to_nifti.py ./${MRN}-2-sorted ${MRN}-3-converted
 
 exit 0
-
 
