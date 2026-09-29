@@ -173,6 +173,7 @@ class RegistrationStatusTracker:
                 temporary_file.write("\n")
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())
+                os.fchmod(temporary_file.fileno(), 0o644)
             os.replace(temporary_path, self.output_path)
             temporary_path = None
         finally:
