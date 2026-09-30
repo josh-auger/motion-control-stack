@@ -64,7 +64,7 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--crlf',            action='store_true', help='Use Windows (CRLF) line endings')
     parser.add_argument('--moco', type=str, choices=['on', 'off'], help='Enable/disable motion correction')
     parser.add_argument('--send-dashboard', choices=['on', 'off'], help='Enable/disable scanner motion dashboard return')
-    parser.add_argument('--regtype', type=str, choices=['slice', 'smsgroup', 'volume'], help='Registration type')
+    parser.add_argument('--regtype', type=str, choices=['slice', 'smsgroup', 'volume', 'by2slices'], help='Registration type')
 
     parser.set_defaults(**defaults)
     args = parser.parse_args()

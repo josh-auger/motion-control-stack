@@ -296,7 +296,7 @@ class handleData:
         dashboard_meta['SequenceDescriptionAdditional'] = 'MOTION_DASHBOARD'
         dashboard_meta['Keep_image_geometry'] = 1
         dashboard_meta['InternalSend'] = 1
-        dashboard_meta['SiemensControl_SkipSaveOnHost'] = ['bool', 'true']  # Only display in inline viewer, no DICOMs generated
+        # dashboard_meta['SiemensControl_SkipSaveOnHost'] = ['bool', 'true']  # Only display in inline viewer, no DICOMs generated
         dashboard_img.attribute_string = dashboard_meta.serialize()
 
         return dashboard_img
@@ -949,13 +949,15 @@ class handleData:
                 # self.groupsize = 46  # JDA: for testing, force grouping of X image slices together for registration
             elif self.registration_type == "volume":
                 self.groupsize = self.nslices_per_volume
+            elif self.registration_type == "by2slices":
+                self.groupsize = 2
             else:
                 logging.info(
-                    f"Unknown registration type '{self.registration_type}'. Using default 'slice', group size = 1.")
+                    f"Unknown registration type '{self.registration_type}'. Using default 'smsgroup', group size = sms factor.")
 
             logging.info(f"\tRegistration type '{self.registration_type}', image slice group size : {self.groupsize}")
         else:
-            logging.info(f"Registration type not specified. Using default 'slice', group size = 1.")
+            logging.info(f"Registration type not specified. Defaulting to group size = 1.")
             self.groupsize = 1
 
         return
