@@ -8,6 +8,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from analysis_common import (
     AnalysisError,
     add_common_arguments,
@@ -26,6 +28,17 @@ from analysis_common import (
 
 
 VALID_STATUSES = {"registered", "skipped", "failed"}
+OUTCOME_ORDER = ("registered", "skipped", "failed")
+OUTCOME_CODES = {status: index for index, status in enumerate(OUTCOME_ORDER)}
+OUTCOME_COLORS = {
+    "registered": "#3976af",
+    "skipped": "#e1812c",
+    "failed": "#c44e52",
+}
+VOLUME_FIELDS = [
+    "volume", "expected", "registered", "skipped", "failed",
+    "registration_finalized",
+]
 
 
 def parse_status(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -48,6 +61,7 @@ def parse_status(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
         if not isinstance(groups, dict):
             raise AnalysisError(f"Required groups object is missing for volume {volume}")
         counts: Counter[str] = Counter()
+        group_outcomes = {}
         for group_text, record in groups.items():
             try:
                 group = int(group_text)
@@ -57,12 +71,14 @@ def parse_status(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
                 raise AnalysisError(f"Invalid terminal status for volume {volume}, group {group}")
             status = record["status"]
             counts[status] += 1
+            group_outcomes[group] = status
             if status != "registered":
                 exception_rows.append({"volume": volume, "group": group, "status": status, "reason": record.get("reason", "")})
         volume_rows.append({
             "volume": volume, "expected": len(groups), "registered": counts["registered"],
             "skipped": counts["skipped"], "failed": counts["failed"],
             "registration_finalized": finalized,
+            "group_outcomes": dict(sorted(group_outcomes.items())),
         })
     volume_rows.sort(key=lambda row: row["volume"])
     exception_rows.sort(key=lambda row: (row["volume"], row["group"]))
@@ -71,31 +87,82 @@ def parse_status(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
 
 def constant_expected_count(rows: list[dict[str, Any]]) -> int | None:
     expected = {int(row["expected"]) for row in rows}
-    return next(iter(expected)) if len(expected) == 1 else None
+    if len(expected) != 1:
+        return None
+    count = next(iter(expected))
+    expected_groups = list(range(count))
+    if any(sorted(row["group_outcomes"]) != expected_groups for row in rows):
+        return None
+    return count
+
+
+def outcome_matrix(
+    rows: list[dict[str, Any]],
+) -> tuple[np.ndarray, list[int], list[int]]:
+    """Build a group-by-volume outcome grid at the explicit schema coordinates."""
+    represented_volumes = [int(row["volume"]) for row in rows]
+    represented_groups = [
+        int(group)
+        for row in rows
+        for group in row["group_outcomes"]
+    ]
+    if not represented_volumes or not represented_groups:
+        return np.empty((0, 0)), [], []
+    volumes = list(range(min(represented_volumes), max(represented_volumes) + 1))
+    groups = list(range(min(represented_groups), max(represented_groups) + 1))
+    matrix = np.full((len(groups), len(volumes)), np.nan)
+    volume_offset, group_offset = volumes[0], groups[0]
+    for row in rows:
+        column = int(row["volume"]) - volume_offset
+        for group, status in row["group_outcomes"].items():
+            matrix[int(group) - group_offset, column] = OUTCOME_CODES[status]
+    return matrix, volumes, groups
 
 
 def build_completeness_figure(rows: list[dict[str, Any]]):
     plt = pyplot()
+    from matplotlib.colors import BoundaryNorm, ListedColormap
+    from matplotlib.patches import Patch
     from matplotlib.ticker import MaxNLocator, MultipleLocator
 
     fig, ax = plt.subplots(figsize=(11, 5))
-    volumes = [r["volume"] for r in rows]
-    registered = [r["registered"] for r in rows]
-    skipped = [r["skipped"] for r in rows]
-    failed = [r["failed"] for r in rows]
-    ax.bar(volumes, registered, label="registered", color="#3976af", width=1.0)
-    ax.bar(volumes, skipped, bottom=registered, label="skipped", color="#e1812c", width=1.0)
-    bottom = [a + b for a, b in zip(registered, skipped)]
-    ax.bar(volumes, failed, bottom=bottom, label="failed", color="#c44e52", width=1.0)
+    matrix, volumes, groups = outcome_matrix(rows)
+    cmap = ListedColormap(
+        [OUTCOME_COLORS[status] for status in OUTCOME_ORDER]
+    ).with_extremes(bad=(0, 0, 0, 0))
+    norm = BoundaryNorm(np.arange(-0.5, len(OUTCOME_ORDER) + 0.5), cmap.N)
+    mesh = ax.pcolormesh(
+        np.arange(volumes[0] - 0.5, volumes[-1] + 1.5),
+        np.arange(groups[0], groups[-1] + 2),
+        np.ma.masked_invalid(matrix),
+        cmap=cmap,
+        norm=norm,
+        shading="flat",
+        antialiased=False,
+    )
     ax.set_xlabel("Volume")
-    ax.set_ylabel("Registration opportunities")
+    ax.set_ylabel("Registration group")
     ax.set_title("Registration completeness by volume")
-    ax.set_ylim(bottom=0)
+    ax.set_xlim(volumes[0] - 0.5, volumes[-1] + 0.5)
+    ax.set_ylim(groups[0], groups[-1] + 1)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
     ax.yaxis.set_major_locator(MaxNLocator(integer=True, min_n_ticks=3))
+    outcome_totals = {
+        status: sum(int(row[status]) for row in rows)
+        for status in OUTCOME_ORDER
+    }
+    legend_handles = [
+        Patch(
+            facecolor=OUTCOME_COLORS[status],
+            label=f"{status} ({outcome_totals[status]})",
+        )
+        for status in OUTCOME_ORDER
+    ]
     legend = ax.legend(
+        handles=legend_handles,
         loc="upper center",
         bbox_to_anchor=(0.5, -0.22),
-        ncol=3,
+        ncol=len(legend_handles),
         borderaxespad=0.0,
     )
     expected = constant_expected_count(rows)
@@ -111,12 +178,12 @@ def build_completeness_figure(rows: list[dict[str, Any]]):
         percent_axis.set_ylabel("Percent of volume (%)")
         percent_axis.yaxis.set_major_locator(MultipleLocator(20))
     fig.subplots_adjust(bottom=0.28, right=0.88 if percent_axis else 0.96)
-    return fig, ax, percent_axis, expected, legend
+    return fig, ax, percent_axis, expected, legend, mesh
 
 
 def _plot(rows: list[dict[str, Any]], output: Path) -> dict[str, Any]:
     plt = pyplot()
-    fig, _ax, percent_axis, expected, _legend = build_completeness_figure(rows)
+    fig, _ax, percent_axis, expected, _legend, _mesh = build_completeness_figure(rows)
     fig.savefig(output, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return {"percent_axis": percent_axis is not None, "expected": expected}
@@ -133,7 +200,7 @@ def run(input_directory: Path, output_arg: Path | None = None) -> Path:
     success = 100.0 * totals["registered"] / totals["expected"] if totals["expected"] else None
     degraded = [row for row in volumes if row["registered"] < row["expected"]]
     unfinalized = [row["volume"] for row in volumes if not row["registration_finalized"]]
-    write_csv(output / "registration_completeness_by_volume.csv", volumes, list(volumes[0]))
+    write_csv(output / "registration_completeness_by_volume.csv", volumes, VOLUME_FIELDS)
     write_csv(output / "skipped_registrations.csv", [r for r in exceptions if r["status"] == "skipped"], ["volume", "group", "status", "reason"])
     write_csv(output / "failed_registrations.csv", [r for r in exceptions if r["status"] == "failed"], ["volume", "group", "status", "reason"])
     plot_info = _plot(volumes, output / "registration_completeness_by_volume.png")

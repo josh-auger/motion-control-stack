@@ -11,6 +11,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -29,7 +31,8 @@ from analyze_queue_profile import (  # noqa: E402
     match_receipts_to_queue_items, parse_items, scan_discovery_medians_by_volume,
 )
 from analyze_registration_completeness import (  # noqa: E402
-    _plot as plot_completeness, build_completeness_figure, parse_status,
+    OUTCOME_CODES, OUTCOME_COLORS, _plot as plot_completeness,
+    build_completeness_figure, outcome_matrix, parse_status,
 )
 from analyze_registration_calls import (  # noqa: E402
     _plots as plot_registration_calls, log_only_rows, parse_log_components,
@@ -251,6 +254,19 @@ class DashboardPlotTests(unittest.TestCase):
 
 
 class RegistrationCompletenessTests(unittest.TestCase):
+    @staticmethod
+    def _row(volume, statuses):
+        group_outcomes = dict(enumerate(statuses))
+        return {
+            "volume": volume,
+            "expected": len(statuses),
+            "registered": statuses.count("registered"),
+            "skipped": statuses.count("skipped"),
+            "failed": statuses.count("failed"),
+            "registration_finalized": True,
+            "group_outcomes": group_outcomes,
+        }
+
     def test_registered_skipped_failed_variable_shapes(self):
         payload = {
             "schema_version": 1, "revision": 2,
@@ -270,6 +286,10 @@ class RegistrationCompletenessTests(unittest.TestCase):
             volumes, exceptions = parse_status(path)
             self.assertEqual([r["volume"] for r in volumes], [4, 20])
             self.assertEqual(volumes[0]["expected"], 3)
+            self.assertEqual(
+                volumes[0]["group_outcomes"],
+                {0: "registered", 5: "skipped", 11: "failed"},
+            )
             self.assertEqual({r["status"] for r in exceptions}, {"skipped", "failed"})
 
     def test_empty_status_and_invalid_schema_are_handled(self):
@@ -281,20 +301,45 @@ class RegistrationCompletenessTests(unittest.TestCase):
             with self.assertRaisesRegex(AnalysisError, "schema_version"):
                 parse_status(path)
 
-    def test_integer_ticks_constant_percent_axis_and_legend_save(self):
+    def test_positional_outcome_matrix_and_discrete_rendering(self):
         rows = [
-            {"volume": 1, "expected": 4, "registered": 4, "skipped": 0, "failed": 0},
-            {"volume": 2, "expected": 4, "registered": 3, "skipped": 1, "failed": 0},
+            self._row(0, ["registered", "registered", "registered", "registered"]),
+            self._row(1, ["skipped", "registered", "registered", "registered"]),
+            self._row(2, ["registered", "registered", "registered", "skipped"]),
+            self._row(3, ["registered", "registered", "skipped", "registered"]),
+            self._row(4, ["registered", "skipped", "registered", "skipped"]),
+            self._row(5, ["registered", "registered", "failed", "registered"]),
         ]
-        fig, ax, secondary, expected, legend = build_completeness_figure(rows)
+        matrix, volumes, groups = outcome_matrix(rows)
+        r, s, f = (OUTCOME_CODES[status] for status in ("registered", "skipped", "failed"))
+        self.assertEqual(volumes, [0, 1, 2, 3, 4, 5])
+        self.assertEqual(groups, [0, 1, 2, 3])
+        self.assertEqual(matrix.tolist(), [
+            [r, s, r, r, r, r],
+            [r, r, r, r, s, r],
+            [r, r, r, s, r, f],
+            [r, r, s, r, s, r],
+        ])
+
+        fig, ax, secondary, expected, legend, mesh = build_completeness_figure(rows)
         fig.canvas.draw()
         self.assertEqual(expected, 4)
         self.assertIsNotNone(secondary)
         ticks = [tick for tick in ax.get_yticks() if ax.get_ylim()[0] <= tick <= ax.get_ylim()[1]]
         self.assertTrue(all(float(tick).is_integer() for tick in ticks))
         self.assertAlmostEqual(secondary._functions[0](4), 100.0)
+        self.assertEqual(ax.get_ylim(), (0.0, 4.0))
+        self.assertEqual(mesh._shading, "flat")
+        from matplotlib.collections import QuadMesh
+        from matplotlib.colors import to_rgba
+        self.assertIsInstance(mesh, QuadMesh)
+        for status, code in OUTCOME_CODES.items():
+            self.assertEqual(mesh.cmap(mesh.norm(code)), to_rgba(OUTCOME_COLORS[status]))
         self.assertEqual(legend._ncols, 3)
         self.assertLess(legend.get_bbox_to_anchor()._bbox.y0, 0)
+        self.assertEqual([text.get_text() for text in legend.get_texts()], [
+            "registered (18)", "skipped (5)", "failed (1)",
+        ])
         fig.clf()
         with tempfile.TemporaryDirectory() as directory:
             info = plot_completeness(rows, Path(directory) / "plot.png")
@@ -303,10 +348,18 @@ class RegistrationCompletenessTests(unittest.TestCase):
 
     def test_variable_expected_counts_omit_percent_axis(self):
         rows = [
-            {"volume": 0, "expected": 1, "registered": 1, "skipped": 0, "failed": 0},
-            {"volume": 1, "expected": 4, "registered": 4, "skipped": 0, "failed": 0},
+            {
+                "volume": 0, "expected": 1, "registered": 1,
+                "skipped": 0, "failed": 0, "registration_finalized": True,
+                "group_outcomes": {22: "registered"},
+            },
+            self._row(1, ["registered", "registered", "registered", "registered"]),
         ]
-        fig, _ax, secondary, expected, _legend = build_completeness_figure(rows)
+        matrix, volumes, groups = outcome_matrix(rows)
+        self.assertEqual((volumes, groups), ([0, 1], list(range(23))))
+        self.assertTrue(np.isnan(matrix[0, 0]))
+        self.assertEqual(matrix[22, 0], OUTCOME_CODES["registered"])
+        fig, _ax, secondary, expected, _legend, _mesh = build_completeness_figure(rows)
         self.assertIsNone(expected)
         self.assertIsNone(secondary)
         fig.clf()
