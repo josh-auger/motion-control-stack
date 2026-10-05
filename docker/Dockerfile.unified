@@ -1,6 +1,26 @@
 ARG SLIMM_MARS_IMAGE=slimm-v3:mars-cuda11.6-sm86
 FROM ${SLIMM_MARS_IMAGE} AS slimm-mars
 
+# Build the MARS CUDA diagnostic in the same CUDA 11.6.2 / GCC 9 image used
+# to build the MARS-compatible SLIMM executable. Keep both sm_86 machine code
+# and compute_86 PTX, and fail the build if nvcc or CUDA runtime linkage drifts.
+COPY tools/cuda_compat_check.cu /tmp/cuda_compat_check.cu
+RUN /usr/local/cuda/bin/nvcc --version | grep -F "release 11.6, V11.6.124" && \
+    mkdir -p /opt/slimm/build && \
+    /usr/local/cuda/bin/nvcc \
+        -std=c++14 \
+        -O2 \
+        --cudart=static \
+        --generate-code=arch=compute_86,code=sm_86 \
+        --generate-code=arch=compute_86,code=compute_86 \
+        /tmp/cuda_compat_check.cu \
+        -o /opt/slimm/build/cuda-compat-check \
+        -ldl && \
+    if ldd /opt/slimm/build/cuda-compat-check | grep -q libcudart; then \
+        echo "cuda-compat-check unexpectedly uses a shared CUDA runtime" >&2; \
+        exit 1; \
+    fi
+
 FROM shared-base-build:devel AS base
 
 ARG THREADS=1
@@ -209,6 +229,8 @@ FROM runtime-base AS runtime-mars
 RUN mkdir -p /opt/moco/lib
 COPY --from=slimm-mars /opt/slimm/build/cuda-standalone-registration \
     /opt/moco/bin/cuda-standalone-registration
+COPY --from=slimm-mars /opt/slimm/build/cuda-compat-check \
+    /opt/moco/bin/cuda-compat-check
 COPY --from=slimm-mars /usr/lib/x86_64-linux-gnu/libnlopt_cxx.so.0.10.0 \
     /opt/moco/lib/libnlopt_cxx.so.0
 
