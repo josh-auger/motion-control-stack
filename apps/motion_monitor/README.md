@@ -19,6 +19,15 @@ Once all transform parameters have been compiled into an array list, then a seri
 The motion-monitor will write all outputs and a log file (*.log) to an outputs sub-folder (./inputfilename_outputs/) 
 within the parent directory that is specified in the run bash script (see Run Instructions below).
 
+## tSNR assembly modes
+
+`TSNR_ASSEMBLY_MODE` accepts two values:
+
+- `physical` is the default and preserves the existing geometry-aware slice checks and physical-z assembly.
+- `reference_grid` measures scanner-visible image stability. It freezes the volume-0 detached-NRRD LIST order as the canonical z grid, maps later `slice_NNNN` identities onto those planes, and copies each raw 2-D array without interpolation, rotation, translation, or use of its frame-dependent direction/origin. Registration continues to use the original `.nhdr` geometry unchanged.
+
+Reference-grid mode still requires complete one-to-one slice membership, the reference matrix shape, and matching in-plane sampling spacing. Its map is acquisition-local and resets at acquisition close.
+
 ## Build Instructions
 To build the motion-monitor container:
 - Clone the github repository: https://github.com/josh-auger/motion-monitor

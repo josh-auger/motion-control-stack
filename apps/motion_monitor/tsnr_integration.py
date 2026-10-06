@@ -7,7 +7,10 @@ import logging
 import os
 import re
 import time
+from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum, auto
 from os import PathLike
 
 import numpy as np
@@ -32,6 +35,54 @@ except ImportError:  # Support execution from the motion_monitor application dir
 _POINTER_RE = re.compile(
     r"^(?P<protocol>.+)_volume_(?P<volume>\d{4})_group_(?P<group>\d{4})\.txt$"
 )
+TSNR_ASSEMBLY_MODE_ENV = "TSNR_ASSEMBLY_MODE"
+TSNR_ASSEMBLY_MODES = ("physical", "reference_grid")
+
+
+def load_tsnr_assembly_mode(value: str | None = None) -> str:
+    """Return the validated tSNR assembly mode, defaulting conservatively."""
+    raw_value = os.environ.get(TSNR_ASSEMBLY_MODE_ENV, "physical") if value is None else value
+    mode = raw_value.strip().lower()
+    if mode not in TSNR_ASSEMBLY_MODES:
+        choices = ", ".join(TSNR_ASSEMBLY_MODES)
+        raise ValueError(
+            f"{TSNR_ASSEMBLY_MODE_ENV} must be one of: {choices}; got {raw_value!r}"
+        )
+    return mode
+
+
+@dataclass(frozen=True)
+class TSNRReferenceGrid:
+    """Frozen volume-0 grid and its canonical plane-to-slice identity order."""
+
+    slice_identities: tuple[int, ...]
+    shape: tuple[int, int, int]
+    spacing: tuple[float, float, float]
+    direction: tuple[float, ...]
+    origin: tuple[float, float, float]
+
+    @property
+    def plane_by_slice_identity(self) -> dict[int, int]:
+        return {
+            slice_identity: plane
+            for plane, slice_identity in enumerate(self.slice_identities)
+        }
+
+
+class TSNRVolumeOutcome(Enum):
+    """Result of one bounded attempt to process a tSNR volume."""
+
+    SUCCESS = auto()
+    RETRYABLE = auto()
+    TERMINAL = auto()
+
+
+class _TerminalVolumeError(ValueError):
+    """A published volume is invalid in a way that waiting cannot repair."""
+
+
+class _TerminalGeometryError(_TerminalVolumeError):
+    """A complete, readable volume has geometry that waiting cannot repair."""
 
 
 class TSNRVolumeProcessor:
@@ -45,6 +96,7 @@ class TSNRVolumeProcessor:
         min_samples: int = 20,
         display_max: float = 100.0,
         idle_retry_interval: float = 1.0,
+        assembly_mode: str = "physical",
         accumulator: RunningTSNR | None = None,
         mosaic_factory: Callable[..., np.ndarray] = create_tsnr_mosaic,
         image_saver: Callable[[np.ndarray, str | PathLike[str]], None] = atomic_save_tsnr_image,
@@ -60,27 +112,33 @@ class TSNRVolumeProcessor:
         self.min_samples = min_samples
         self.display_max = display_max
         self.idle_retry_interval = idle_retry_interval
+        self.assembly_mode = load_tsnr_assembly_mode(assembly_mode)
         self.accumulator = accumulator if accumulator is not None else RunningTSNR()
         self.pending_volumes: set[int] = set()
         self.processed_volumes: set[int] = set()
+        self.terminal_volumes: set[int] = set()
         self.image_ready_volumes: dict[int, np.ndarray] = {}
         self.motion_ready_volumes: dict[int, dict[str, int]] = {}
         self._pointer_paths: dict[int, str] = {}
         self._protocol_name: str | None = None
+        self.reference_grid: TSNRReferenceGrid | None = None
         self._last_idle_retry = 0.0
         self._mosaic_factory = mosaic_factory
         self._image_saver = image_saver
         self._logger = logger if logger is not None else logging.getLogger(__name__)
+        self._logger.info("TSNR: assembly mode = %s", self.assembly_mode)
 
     def reset(self) -> None:
         """Reset per-acquisition TSNR state without deleting the last JPEG."""
         self.accumulator.reset()
         self.pending_volumes.clear()
         self.processed_volumes.clear()
+        self.terminal_volumes.clear()
         self.image_ready_volumes.clear()
         self.motion_ready_volumes.clear()
         self._pointer_paths.clear()
         self._protocol_name = None
+        self.reference_grid = None
         self._last_idle_retry = 0.0
 
     def handle_pointer(
@@ -110,7 +168,10 @@ class TSNRVolumeProcessor:
             )
             return
 
-        if volume_number not in self.processed_volumes:
+        if (
+            volume_number not in self.processed_volumes
+            and volume_number not in self.terminal_volumes
+        ):
             self.pending_volumes.add(volume_number)
             self._pointer_paths[volume_number] = pointer_path
 
@@ -192,40 +253,77 @@ class TSNRVolumeProcessor:
     def retry_pending(self, expected_slice_count: int | None) -> None:
         """Attempt each pending volume once, oldest volume number first."""
         for volume_number in sorted(self.pending_volumes):
-            if volume_number in self.processed_volumes:
+            if (
+                volume_number in self.processed_volumes
+                or volume_number in self.terminal_volumes
+            ):
                 self.pending_volumes.discard(volume_number)
                 continue
 
-            if volume_number not in self.image_ready_volumes:
-                try:
-                    volume = self._load_volume(volume_number, expected_slice_count)
-                    if volume is None:
-                        continue
-                    if (
-                        self.accumulator.mean is not None
-                        and volume.shape != self.accumulator.mean.shape
-                    ):
-                        raise ValueError(
-                            f"assembled shape {volume.shape} does not match reference "
-                            f"shape {self.accumulator.mean.shape}"
-                        )
-                    self.image_ready_volumes[volume_number] = volume
-                    self._logger.info("TSNR: volume %d image ready", volume_number)
-                except Exception as error:
-                    self._logger.warning(
-                        "TSNR: volume %d remains pending: %s", volume_number, error
+            self._attempt_pending_volume(volume_number, expected_slice_count)
+
+    def _attempt_pending_volume(
+        self,
+        volume_number: int,
+        expected_slice_count: int | None,
+    ) -> TSNRVolumeOutcome:
+        """Make one explicitly classified processing attempt for a volume."""
+        if volume_number in self.processed_volumes:
+            return TSNRVolumeOutcome.SUCCESS
+        if volume_number in self.terminal_volumes:
+            return TSNRVolumeOutcome.TERMINAL
+
+        if volume_number not in self.image_ready_volumes:
+            try:
+                volume = self._load_volume(volume_number, expected_slice_count)
+                if volume is None:
+                    return TSNRVolumeOutcome.RETRYABLE
+                if (
+                    self.accumulator.mean is not None
+                    and volume.shape != self.accumulator.mean.shape
+                ):
+                    raise _TerminalGeometryError(
+                        f"assembled shape {volume.shape} does not match reference "
+                        f"shape {self.accumulator.mean.shape}"
                     )
-                    continue
+                self.image_ready_volumes[volume_number] = volume
+                self._logger.info("TSNR: volume %d image ready", volume_number)
+            except _TerminalVolumeError as error:
+                self._mark_terminal(volume_number, str(error))
+                return TSNRVolumeOutcome.TERMINAL
+            except Exception as error:
+                # Publication and read failures, plus unexpected internal errors,
+                # remain visible and retryable under the existing runtime policy.
+                self._logger.warning(
+                    "TSNR: volume %d remains pending: %s", volume_number, error
+                )
+                return TSNRVolumeOutcome.RETRYABLE
 
-            self._maybe_process_volume(volume_number)
+        return self._maybe_process_volume(volume_number)
 
-    def _maybe_process_volume(self, volume_number: int) -> bool:
+    def _mark_terminal(self, volume_number: int, reason: str) -> None:
+        """Record one acquisition-local rejection and suppress future work."""
+        if volume_number in self.terminal_volumes:
+            return
+        self.terminal_volumes.add(volume_number)
+        self.pending_volumes.discard(volume_number)
+        self.image_ready_volumes.pop(volume_number, None)
+        self._pointer_paths.pop(volume_number, None)
+        self._logger.warning(
+            "TSNR: volume %d terminally rejected: %s; future retries suppressed",
+            volume_number,
+            reason,
+        )
+
+    def _maybe_process_volume(self, volume_number: int) -> TSNRVolumeOutcome:
         """Accumulate exactly once after image and registration are both ready."""
         if volume_number in self.processed_volumes:
-            return False
+            return TSNRVolumeOutcome.SUCCESS
+        if volume_number in self.terminal_volumes:
+            return TSNRVolumeOutcome.TERMINAL
         volume = self.image_ready_volumes.get(volume_number)
         if volume is None or volume_number not in self.motion_ready_volumes:
-            return False
+            return TSNRVolumeOutcome.RETRYABLE
 
         try:
             self.accumulator.update(volume)
@@ -233,7 +331,7 @@ class TSNRVolumeProcessor:
             self._logger.warning(
                 "TSNR: volume %d remains pending: %s", volume_number, error
             )
-            return False
+            return TSNRVolumeOutcome.RETRYABLE
 
         # Success ordering is deliberate: update first, then mark processed.
         self.processed_volumes.add(volume_number)
@@ -257,7 +355,7 @@ class TSNRVolumeProcessor:
 
         # Display errors must not make an accumulated volume eligible again.
         self._update_display(volume.shape[1:])
-        return True
+        return TSNRVolumeOutcome.SUCCESS
 
     def _retire_volume_files(self, volume_number: int) -> None:
         """Move one consumed non-reference volume out of the acquisition root."""
@@ -443,6 +541,17 @@ class TSNRVolumeProcessor:
                 volume_number,
             )
             return None
+        if self.assembly_mode == "reference_grid":
+            if self.reference_grid is None:
+                raise _TerminalVolumeError(
+                    "reference-grid map unavailable after volume 0 accumulation"
+                )
+            reference_count = len(self.reference_grid.slice_identities)
+            if expected_slice_count != reference_count:
+                raise _TerminalVolumeError(
+                    f"slice count metadata {expected_slice_count} does not match "
+                    f"reference grid {reference_count}"
+                )
         return self._load_slice_volume(volume_number, expected_slice_count)
 
     def _load_reference_volume(self) -> np.ndarray | None:
@@ -458,38 +567,169 @@ class TSNRVolumeProcessor:
             raise OSError(f"failed to read reference pointer: {error}") from error
 
         if len(listed_names) != 1:
-            raise ValueError(
+            raise _TerminalVolumeError(
                 f"reference pointer must list exactly one header; found {len(listed_names)}"
             )
         listed_name = listed_names[0]
         if os.path.basename(listed_name) != listed_name:
-            raise ValueError("reference pointer must contain a header basename")
+            raise _TerminalVolumeError(
+                "reference pointer must contain a header basename"
+            )
         expected_prefix = f"{self._protocol_name}_volume_0000_"
         if (
             not listed_name.startswith(expected_prefix)
             or not listed_name.endswith(".nhdr")
             or listed_name.endswith("_upsampled.nhdr")
         ):
-            raise ValueError(f"unexpected reference header name: {listed_name}")
+            raise _TerminalVolumeError(
+                f"unexpected reference header name: {listed_name}"
+            )
 
         reference_path = os.path.join(self.input_dir, listed_name)
         reference_image = sitk.ReadImage(reference_path)
         reference_array = sitk.GetArrayFromImage(reference_image)
         if reference_array.ndim != 3:
-            raise ValueError(
+            raise _TerminalGeometryError(
                 f"reference must be a 3D volume; got shape {reference_array.shape}"
             )
+        if self.assembly_mode == "reference_grid":
+            reference_grid = self._build_reference_grid(
+                reference_path,
+                reference_image,
+                reference_array,
+            )
+            if self.reference_grid is None:
+                self.reference_grid = reference_grid
+                plane_count = len(reference_grid.slice_identities)
+                self._logger.info(
+                    "TSNR: reference grid initialized from volume 0: %d/%d planes mapped",
+                    plane_count,
+                    plane_count,
+                )
+            elif self.reference_grid != reference_grid:
+                raise _TerminalVolumeError(
+                    "volume-0 reference grid changed after initialization"
+                )
         return reference_array
+
+    def _build_reference_grid(
+        self,
+        reference_path: str,
+        reference_image: sitk.Image,
+        reference_array: np.ndarray,
+    ) -> TSNRReferenceGrid:
+        """Derive the frozen identity-to-plane map from FIRE's volume-0 LIST.
+
+        FIRE assigns ``slice_NNNN`` from its per-volume acquisition counter and
+        writes those raw basenames into the reference LIST only after sorting
+        volume 0 into physical-z order. The LIST therefore persists the exact
+        acquisition-identity to canonical-plane relationship needed here.
+        """
+        assert self._protocol_name is not None
+        try:
+            with open(reference_path, "r", encoding="utf-8") as header_file:
+                header_lines = header_file.read().splitlines()
+        except OSError as error:
+            raise OSError(f"failed to read reference header: {error}") from error
+
+        list_start: int | None = None
+        for line_number, line in enumerate(header_lines):
+            key, separator, value = line.partition(":")
+            if separator and key.strip().lower() == "data file":
+                if value.strip().upper() != "LIST":
+                    raise _TerminalVolumeError(
+                        "reference-grid mode requires FIRE's detached data file: LIST"
+                    )
+                list_start = line_number + 1
+                break
+        if list_start is None:
+            raise _TerminalVolumeError(
+                "reference-grid mode requires a data file: LIST reference header"
+            )
+
+        listed_raw_names = [
+            line.strip()
+            for line in header_lines[list_start:]
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        expected_pattern = re.compile(
+            rf"^{re.escape(self._protocol_name)}_volume_0000_slice_(?P<identity>\d{{4}})\.raw$"
+        )
+        slice_identities: list[int] = []
+        for plane, raw_name in enumerate(listed_raw_names):
+            if os.path.basename(raw_name) != raw_name:
+                raise _TerminalVolumeError(
+                    f"reference plane {plane} raw entry is not a basename: {raw_name}"
+                )
+            match = expected_pattern.fullmatch(raw_name)
+            if match is None:
+                raise _TerminalVolumeError(
+                    f"reference plane {plane} has unexpected raw entry: {raw_name}"
+                )
+            slice_identities.append(int(match.group("identity")))
+
+        depth = int(reference_array.shape[0])
+        if len(slice_identities) != depth:
+            raise _TerminalVolumeError(
+                f"reference LIST has {len(slice_identities)} planes but image depth is {depth}"
+            )
+        duplicate_identities = sorted(
+            identity
+            for identity, count in Counter(slice_identities).items()
+            if count > 1
+        )
+        expected_identities = set(range(depth))
+        observed_identities = set(slice_identities)
+        missing_identities = sorted(expected_identities - observed_identities)
+        unknown_identities = sorted(observed_identities - expected_identities)
+        if duplicate_identities or missing_identities or unknown_identities:
+            raise _TerminalVolumeError(
+                "reference-plane map is not one-to-one "
+                f"(duplicates={duplicate_identities}, missing={missing_identities}, "
+                f"unknown={unknown_identities})"
+            )
+
+        spacing = tuple(float(value) for value in reference_image.GetSpacing())
+        direction = tuple(float(value) for value in reference_image.GetDirection())
+        origin = tuple(float(value) for value in reference_image.GetOrigin())
+        if (
+            not np.isfinite(spacing).all()
+            or any(value <= 0 for value in spacing)
+            or not np.isfinite(direction).all()
+            or not np.isfinite(origin).all()
+        ):
+            raise _TerminalGeometryError(
+                "volume-0 reference grid has invalid physical geometry"
+            )
+
+        return TSNRReferenceGrid(
+            slice_identities=tuple(slice_identities),
+            shape=tuple(int(value) for value in reference_array.shape),
+            spacing=spacing,
+            direction=direction,
+            origin=origin,
+        )
 
     def _load_slice_volume(
         self,
         volume_number: int,
         expected_slice_count: int,
     ) -> np.ndarray | None:
+        if self.assembly_mode == "reference_grid":
+            return self._load_reference_grid_slice_volume(
+                volume_number,
+                expected_slice_count,
+            )
+        return self._load_physical_slice_volume(volume_number, expected_slice_count)
+
+    def _discover_slice_paths(
+        self,
+        volume_number: int,
+    ) -> tuple[dict[int, list[str]], list[str]]:
         assert self._protocol_name is not None
         prefix = f"{self._protocol_name}_volume_{volume_number:04d}_slice_"
         suffix = ".nhdr"
-        slice_paths_by_index: dict[int, list[str]] = {}
+        slice_paths_by_identity: dict[int, list[str]] = {}
         unexpected_names: list[str] = []
 
         for name in os.listdir(self.input_dir):
@@ -499,33 +739,64 @@ class TSNRVolumeProcessor:
             if not re.fullmatch(r"\d{4}", index_text):
                 unexpected_names.append(name)
                 continue
-            slice_paths_by_index.setdefault(int(index_text), []).append(
+            slice_paths_by_identity.setdefault(int(index_text), []).append(
                 os.path.join(self.input_dir, name)
             )
+        return slice_paths_by_identity, unexpected_names
 
-        expected_indices = set(range(expected_slice_count))
-        discovered_indices = set(slice_paths_by_index)
-        duplicate_indices = sorted(
-            index for index, paths in slice_paths_by_index.items() if len(paths) != 1
+    def _validate_slice_membership(
+        self,
+        volume_number: int,
+        expected_identities: set[int],
+        slice_paths_by_identity: dict[int, list[str]],
+        unexpected_names: list[str],
+    ) -> bool:
+        """Return False while expected files may still arrive; reject fixed defects."""
+        discovered_identities = set(slice_paths_by_identity)
+        duplicate_identities = sorted(
+            identity
+            for identity, paths in slice_paths_by_identity.items()
+            if len(paths) != 1
         )
-        if (
-            discovered_indices != expected_indices
-            or duplicate_indices
-            or unexpected_names
-        ):
-            missing = sorted(expected_indices - discovered_indices)
-            unexpected = sorted(discovered_indices - expected_indices)
+        missing = sorted(expected_identities - discovered_identities)
+        unknown = sorted(discovered_identities - expected_identities)
+        if missing:
             self._logger.info(
-                "TSNR: volume %d pending (%d/%d slices; missing=%d; "
-                "unexpected=%d; duplicates=%d; malformed=%d)",
+                "TSNR: volume %d pending (%d/%d planes; missing=%s; "
+                "unknown=%s; duplicates=%s; malformed=%d)",
                 volume_number,
-                len(discovered_indices & expected_indices),
-                expected_slice_count,
-                len(missing),
-                len(unexpected),
-                len(duplicate_indices),
+                len(discovered_identities & expected_identities),
+                len(expected_identities),
+                missing,
+                unknown,
+                duplicate_identities,
                 len(unexpected_names),
             )
+            return False
+        if unknown or duplicate_identities or unexpected_names:
+            raise _TerminalVolumeError(
+                f"volume {volume_number} published slice mapping is invalid "
+                f"(unknown={unknown}, duplicates={duplicate_identities}, "
+                f"malformed={unexpected_names})"
+            )
+        return True
+
+    def _load_physical_slice_volume(
+        self,
+        volume_number: int,
+        expected_slice_count: int,
+    ) -> np.ndarray | None:
+        slice_paths_by_index, unexpected_names = self._discover_slice_paths(
+            volume_number
+        )
+
+        expected_indices = set(range(expected_slice_count))
+        if not self._validate_slice_membership(
+            volume_number,
+            expected_indices,
+            slice_paths_by_index,
+            unexpected_names,
+        ):
             return None
 
         loaded: list[tuple[float, int, np.ndarray]] = []
@@ -544,7 +815,7 @@ class TSNRVolumeProcessor:
 
             array = sitk.GetArrayFromImage(image)
             if image.GetDimension() != 3 or array.ndim != 3 or array.shape[0] != 1:
-                raise ValueError(
+                raise _TerminalGeometryError(
                     f"slice {slice_index} is not one 3D single-plane image: "
                     f"dimension={image.GetDimension()}, shape={array.shape}"
                 )
@@ -553,18 +824,20 @@ class TSNRVolumeProcessor:
             direction = np.asarray(image.GetDirection(), dtype=np.float64).reshape(3, 3)
             plane_direction = direction[:, :2]
             if not np.isfinite(spacing).all() or any(value <= 0 for value in spacing):
-                raise ValueError(
+                raise _TerminalGeometryError(
                     f"slice {slice_index} has invalid in-plane spacing {spacing}"
                 )
             if not np.isfinite(direction).all():
-                raise ValueError(f"slice {slice_index} has non-finite direction values")
+                raise _TerminalGeometryError(
+                    f"slice {slice_index} has non-finite direction values"
+                )
             if not np.allclose(
                 plane_direction.T @ plane_direction,
                 np.eye(2),
                 rtol=1e-5,
                 atol=1e-6,
             ):
-                raise ValueError(
+                raise _TerminalGeometryError(
                     f"slice {slice_index} has invalid in-plane direction geometry"
                 )
 
@@ -574,19 +847,19 @@ class TSNRVolumeProcessor:
                 in_plane_direction = plane_direction
             else:
                 if plane.shape != in_plane_shape:
-                    raise ValueError(
+                    raise _TerminalGeometryError(
                         f"slice {slice_index} shape {plane.shape} does not match "
                         f"{in_plane_shape}"
                     )
                 if not np.allclose(spacing, in_plane_spacing, rtol=1e-5, atol=1e-6):
-                    raise ValueError(
+                    raise _TerminalGeometryError(
                         f"slice {slice_index} in-plane spacing {spacing} does not "
                         f"match {in_plane_spacing}"
                     )
                 if not np.allclose(
                     plane_direction, in_plane_direction, rtol=1e-5, atol=1e-6
                 ):
-                    raise ValueError(
+                    raise _TerminalGeometryError(
                         f"slice {slice_index} in-plane direction is inconsistent"
                     )
 
@@ -595,11 +868,106 @@ class TSNRVolumeProcessor:
                 image.TransformContinuousIndexToPhysicalPoint(center_index)[2]
             )
             if not np.isfinite(center_z):
-                raise ValueError(f"slice {slice_index} has a non-finite center z")
+                raise _TerminalGeometryError(
+                    f"slice {slice_index} has a non-finite center z"
+                )
             loaded.append((center_z, slice_index, plane))
 
         loaded.sort(key=lambda item: (item[0], item[1]))
         return np.stack([item[2] for item in loaded], axis=0)
+
+    def _load_reference_grid_slice_volume(
+        self,
+        volume_number: int,
+        expected_slice_count: int,
+    ) -> np.ndarray | None:
+        reference_grid = self.reference_grid
+        if reference_grid is None:
+            raise _TerminalVolumeError(
+                "reference-grid map unavailable after volume 0 accumulation"
+            )
+        if expected_slice_count != len(reference_grid.slice_identities):
+            raise _TerminalVolumeError(
+                f"volume {volume_number} expects {expected_slice_count} slices but "
+                f"reference grid has {len(reference_grid.slice_identities)} planes"
+            )
+
+        slice_paths_by_identity, unexpected_names = self._discover_slice_paths(
+            volume_number
+        )
+        expected_identities = set(reference_grid.slice_identities)
+        if not self._validate_slice_membership(
+            volume_number,
+            expected_identities,
+            slice_paths_by_identity,
+            unexpected_names,
+        ):
+            return None
+
+        plane_by_identity = reference_grid.plane_by_slice_identity
+        output_planes: list[np.ndarray | None] = [None] * len(expected_identities)
+        expected_shape = reference_grid.shape[1:]
+        expected_spacing = reference_grid.spacing[:2]
+
+        for slice_identity in sorted(expected_identities):
+            slice_path = slice_paths_by_identity[slice_identity][0]
+            try:
+                image = sitk.ReadImage(slice_path)
+            except Exception as error:
+                raise OSError(
+                    f"failed to read slice identity {slice_identity}: {error}"
+                ) from error
+
+            array = sitk.GetArrayFromImage(image)
+            if image.GetDimension() != 3 or array.ndim != 3 or array.shape[0] != 1:
+                raise _TerminalGeometryError(
+                    f"volume {volume_number} slice identity {slice_identity} is not "
+                    f"one 3D single-plane image: dimension={image.GetDimension()}, "
+                    f"shape={array.shape}"
+                )
+            plane = array[0]
+            if plane.shape != expected_shape:
+                raise _TerminalGeometryError(
+                    f"volume {volume_number} slice identity {slice_identity} shape "
+                    f"{plane.shape} does not match reference plane {expected_shape}"
+                )
+
+            spacing = tuple(float(value) for value in image.GetSpacing()[:2])
+            if not np.isfinite(spacing).all() or any(value <= 0 for value in spacing):
+                raise _TerminalGeometryError(
+                    f"volume {volume_number} slice identity {slice_identity} has "
+                    f"invalid in-plane spacing {spacing}"
+                )
+            if not np.allclose(spacing, expected_spacing, rtol=1e-5, atol=1e-6):
+                raise _TerminalGeometryError(
+                    f"volume {volume_number} slice identity {slice_identity} "
+                    f"in-plane spacing {spacing} does not match reference "
+                    f"{expected_spacing}"
+                )
+
+            reference_plane = plane_by_identity.get(slice_identity)
+            if reference_plane is None:
+                raise _TerminalVolumeError(
+                    f"volume {volume_number} has unknown slice identity {slice_identity}"
+                )
+            if output_planes[reference_plane] is not None:
+                raise _TerminalVolumeError(
+                    f"volume {volume_number} maps slice identity {slice_identity} "
+                    f"to duplicate reference plane {reference_plane}"
+                )
+            # Preserve the scanner-visible array exactly. Direction, origin, and
+            # slice normal are intentionally not consulted in reference-grid mode.
+            output_planes[reference_plane] = plane
+
+        missing_planes = [
+            plane for plane, value in enumerate(output_planes) if value is None
+        ]
+        if missing_planes:
+            raise _TerminalVolumeError(
+                f"volume {volume_number} has no slice for reference planes {missing_planes}"
+            )
+        complete_planes = [plane for plane in output_planes if plane is not None]
+        return np.stack(complete_planes, axis=0)
 
     def _update_display(self, output_shape: tuple[int, int]) -> None:
         if self.accumulator.count < self.min_samples:

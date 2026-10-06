@@ -73,10 +73,11 @@ environment variables at runtime.
 | `FIFO_FLAG` | `on`, `off` | Controls queue behavior. `on` processes all incoming data sequentially. `off` skips older items and processes only the most recent data available. |
 
 #### Motion-Monitor
-| Parameter | Units | Description |
+| Parameter | Units / values | Description |
 |-----------|-------|-------------|
 | `HEAD_RADIUS` | mm | Assumed head radius used when converting rotational motion into displacement metrics. |
 | `MOTION_THRESH` | mm | Framewise displacement threshold used to flag excessive motion. |
+| `TSNR_ASSEMBLY_MODE` | `physical`, `reference_grid` | Controls tSNR-only slice assembly. `physical` preserves the existing geometry-aware behavior and is the default. `reference_grid` maps unchanged raw slice arrays onto volume 0's frozen plane order while intentionally ignoring frame-dependent direction and origin. Registration is unaffected. |
 
 The example run script `start_motion_control_stack.sh` is thus written as:
 ```bash
@@ -86,6 +87,7 @@ REG_TYPE="smsgroup"
 FIFO_FLAG="off"
 HEAD_RADIUS=50
 MOTION_THRESH=0.3
+TSNR_ASSEMBLY_MODE="physical"
 
 docker run --rm -it \
   -u $(id -u):$(id -g) \
@@ -97,6 +99,7 @@ docker run --rm -it \
   -e REG_TYPE="$REG_TYPE" \
   -e HEAD_RADIUS="$HEAD_RADIUS" \
   -e MOTION_THRESH="$MOTION_THRESH" \
+  -e TSNR_ASSEMBLY_MODE="$TSNR_ASSEMBLY_MODE" \
   jauger/motion-control-stack:dev all
 ```
 

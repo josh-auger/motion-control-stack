@@ -1,3 +1,6 @@
+"""Manual real-data tSNR replay; execute directly, never during test discovery."""
+
+import unittest
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +11,12 @@ from apps.motion_monitor.running_tsnr import (
     atomic_save_tsnr_image,
     create_tsnr_mosaic,
 )
+
+
+if __name__ != "__main__":
+    raise unittest.SkipTest(
+        "manual archived-data replay is excluded from automated test discovery"
+    )
 
 
 # -------------------------------------------------------------------------

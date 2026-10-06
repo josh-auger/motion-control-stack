@@ -50,6 +50,10 @@ MOTION_DASHBOARD_INTERVAL_SEC=5.0
 # Motion-dashboard generation profiling ("on", "off"); leave off for normal runs
 MOTION_DASHBOARD_PROFILE_FLAG="on"
 
+# tSNR slice assembly ("physical", "reference_grid"). The conservative default
+# preserves saved physical geometry; reference_grid measures scanner-visible pixels.
+TSNR_ASSEMBLY_MODE="reference_grid"
+
 # Toggle sending motion report back to scanner in-line display ("on", "off")
 SEND_DASHBOARD_FLAG="off"
 
@@ -74,6 +78,7 @@ docker run --rm -it \
   -e STREAM_FLAG="$STREAM_FLAG" \
   -e MOTION_DASHBOARD_INTERVAL_SEC="$MOTION_DASHBOARD_INTERVAL_SEC" \
   -e MOTION_DASHBOARD_PROFILE_FLAG="$MOTION_DASHBOARD_PROFILE_FLAG" \
+  -e TSNR_ASSEMBLY_MODE="$TSNR_ASSEMBLY_MODE" \
   -e SEND_DASHBOARD_FLAG="$SEND_DASHBOARD_FLAG" \
   --gpus all \
   jauger/motion-control-stack:cuda all

@@ -32,7 +32,7 @@ from generate_motion_plots import (
     plot_displacements,
     plot_motion_dashboard
 )
-from tsnr_integration import TSNRVolumeProcessor
+from tsnr_integration import TSNRVolumeProcessor, load_tsnr_assembly_mode
 from transform_retirement import (
     TransformRetirementCoordinator,
 )
@@ -305,6 +305,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
     )
 
     TSNR_MIN_SAMPLES = 10
+    tsnr_assembly_mode = load_tsnr_assembly_mode()
     tsnr_output_path = os.path.join(input_dir, "tsnr_mosaic.jpg")
     tsnr_processor = TSNRVolumeProcessor(
         input_dir,
@@ -312,6 +313,7 @@ def monitor_directory(input_dir, head_radius, motion_threshold, stream_port, str
         min_samples=TSNR_MIN_SAMPLES,
         display_max=100.0,
         idle_retry_interval=1.0,
+        assembly_mode=tsnr_assembly_mode,
     )
     tsnr_accumulator = tsnr_processor.accumulator
     tsnr_pending_volumes = tsnr_processor.pending_volumes

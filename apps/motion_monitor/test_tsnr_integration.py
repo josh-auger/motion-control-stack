@@ -11,7 +11,10 @@ import numpy as np
 import SimpleITK as sitk
 
 from apps.motion_monitor.running_tsnr import RunningTSNR
-from apps.motion_monitor.tsnr_integration import TSNRVolumeProcessor
+from apps.motion_monitor.tsnr_integration import (
+    TSNRVolumeProcessor,
+    load_tsnr_assembly_mode,
+)
 
 
 class FailingAccumulator(RunningTSNR):
@@ -62,6 +65,44 @@ class TSNRIntegrationTests(unittest.TestCase):
         sitk.WriteImage(image, path)
         return self._pointer(0, contents=f"{name}\n")
 
+    def _write_reference_grid(
+        self,
+        plane_identities: tuple[int, ...] = (2, 0, 1),
+        *,
+        pixels_by_identity: dict[int, np.ndarray] | None = None,
+    ) -> str:
+        """Write the detached LIST format produced by FIRE for volume 0."""
+        name = f"{self.protocol}_volume_0000_20260916T120000.nhdr"
+        path = os.path.join(self.input_dir, name)
+        raw_names: list[str] = []
+        for identity in plane_identities:
+            raw_name = (
+                f"{self.protocol}_volume_0000_slice_{identity:04d}.raw"
+            )
+            raw_names.append(raw_name)
+            if pixels_by_identity is None:
+                plane = np.full((3, 4), float(identity), dtype=np.float32)
+            else:
+                plane = np.asarray(pixels_by_identity[identity], dtype=np.float32)
+            plane.astype("<f4").tofile(os.path.join(self.input_dir, raw_name))
+
+        with open(path, "w", encoding="utf-8") as header:
+            header.write(
+                "NRRD0004\n"
+                "type: float\n"
+                "dimension: 3\n"
+                f"sizes: 4 3 {len(plane_identities)}\n"
+                "space: left-posterior-superior\n"
+                "space origin: (10, 20, 30)\n"
+                "space directions: (2,0,0) (0,2,0) (0,0,3)\n"
+                "encoding: raw\n"
+                "endian: little\n"
+                "data file: LIST\n"
+            )
+            for raw_name in raw_names:
+                header.write(f"{raw_name}\n")
+        return self._pointer(0, contents=f"{name}\n")
+
     def _write_slice(
         self,
         volume: int,
@@ -69,16 +110,24 @@ class TSNRIntegrationTests(unittest.TestCase):
         *,
         value: float | None = None,
         center_z: float | None = None,
+        direction: tuple[float, ...] | None = None,
+        pixels: np.ndarray | None = None,
+        spacing: tuple[float, float, float] = (2.0, 2.0, 3.0),
     ) -> str:
         path = os.path.join(
             self.input_dir,
             f"{self.protocol}_volume_{volume:04d}_slice_{index:04d}.nhdr",
         )
-        plane_value = float(index if value is None else value)
-        array = np.full((1, 3, 4), plane_value, dtype=np.float32)
+        if pixels is None:
+            plane_value = float(index if value is None else value)
+            array = np.full((1, 3, 4), plane_value, dtype=np.float32)
+        else:
+            array = np.asarray(pixels, dtype=np.float32)[np.newaxis, ...]
         image = sitk.GetImageFromArray(array)
-        image.SetSpacing((2.0, 2.0, 3.0))
+        image.SetSpacing(spacing)
         image.SetOrigin((0.0, 0.0, float(index if center_z is None else center_z)))
+        if direction is not None:
+            image.SetDirection(direction)
         sitk.WriteImage(image, path)
         return path
 
@@ -108,6 +157,198 @@ class TSNRIntegrationTests(unittest.TestCase):
         with open(status_path, "w", encoding="utf-8") as status_file:
             json.dump(document, status_file)
         self.assertTrue(processor.handle_registration_status(status_path))
+
+    def test_assembly_mode_defaults_to_physical_and_rejects_unknown_value(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(load_tsnr_assembly_mode(), "physical")
+        self.assertEqual(load_tsnr_assembly_mode("REFERENCE_GRID"), "reference_grid")
+        with self.assertRaisesRegex(ValueError, "TSNR_ASSEMBLY_MODE"):
+            load_tsnr_assembly_mode("disabled")
+
+    def test_reference_grid_maps_interleaved_identity_and_preserves_pixels(self) -> None:
+        patterns = {
+            identity: (
+                np.arange(12, dtype=np.float32).reshape(3, 4) + identity * 100
+            )
+            for identity in range(3)
+        }
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid(
+                (2, 0, 1),
+                pixels_by_identity=patterns,
+            ),
+            expected_slice_count=None,
+        )
+
+        self.assertIsNotNone(processor.reference_grid)
+        assert processor.reference_grid is not None
+        self.assertEqual(processor.reference_grid.slice_identities, (2, 0, 1))
+        self.assertEqual(processor.reference_grid.shape, (3, 3, 4))
+        self.assertEqual(processor.reference_grid.spacing, (2.0, 2.0, 3.0))
+        self.assertEqual(processor.reference_grid.direction, tuple(np.eye(3).ravel()))
+        self.assertEqual(processor.reference_grid.origin, (10.0, 20.0, 30.0))
+        expected = np.stack([patterns[2], patterns[0], patterns[1]])
+        np.testing.assert_array_equal(processor.accumulator.mean, expected)
+
+        pointer = self._pointer(1)
+        for identity in range(3):
+            angle = 0.01 * (identity + 1)
+            cosine = float(np.cos(angle))
+            sine = float(np.sin(angle))
+            self._write_slice(
+                1,
+                identity,
+                pixels=patterns[identity],
+                center_z=1000.0 - identity * 200.0,
+                direction=(
+                    cosine,
+                    -sine,
+                    0.0,
+                    sine,
+                    cosine,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                ),
+            )
+
+        # Image assembly may complete before registration finalization, but it
+        # cannot accumulate or retire the volume yet.
+        processor.handle_pointer(pointer, expected_slice_count=3)
+        np.testing.assert_array_equal(processor.image_ready_volumes[1], expected)
+        self.assertEqual(processor.accumulator.count, 1)
+        self.assertTrue(os.path.exists(pointer))
+
+        self._motion_ready(processor, 1)
+        self.assertEqual(processor.accumulator.count, 2)
+        self.assertEqual(processor.terminal_volumes, set())
+        np.testing.assert_array_equal(processor.accumulator.mean, expected)
+        np.testing.assert_array_equal(processor.accumulator.M2, np.zeros_like(expected))
+        self.assertFalse(os.path.exists(pointer))
+
+    def test_reference_grid_static_pixels_ignore_changing_geometry(self) -> None:
+        patterns = {
+            identity: np.full((3, 4), identity + 1, dtype=np.float32)
+            for identity in range(3)
+        }
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid(
+                (1, 2, 0),
+                pixels_by_identity=patterns,
+            ),
+            expected_slice_count=None,
+        )
+
+        for volume in (1, 2):
+            pointer = self._pointer(volume)
+            for identity in range(3):
+                angle = volume * 0.02 + identity * 0.01
+                cosine = float(np.cos(angle))
+                sine = float(np.sin(angle))
+                self._write_slice(
+                    volume,
+                    identity,
+                    pixels=patterns[identity],
+                    center_z=float(volume * 100 + identity * 25),
+                    direction=(
+                        cosine,
+                        -sine,
+                        0.0,
+                        sine,
+                        cosine,
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                    ),
+                )
+            self._motion_ready(processor, volume)
+            processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertEqual(processor.accumulator.count, 3)
+        expected = np.stack([patterns[1], patterns[2], patterns[0]])
+        np.testing.assert_array_equal(processor.accumulator.mean, expected)
+        np.testing.assert_array_equal(processor.accumulator.get_variance(), 0.0)
+        np.testing.assert_array_equal(processor.accumulator.get_tsnr(), 0.0)
+
+    def test_reference_grid_incomplete_volume_remains_retryable(self) -> None:
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid((2, 0, 1)),
+            expected_slice_count=None,
+        )
+        pointer = self._pointer(1)
+        self._write_slice(1, 0)
+        self._write_slice(1, 1)
+        self._motion_ready(processor, 1)
+
+        processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertEqual(processor.pending_volumes, {1})
+        self.assertEqual(processor.terminal_volumes, set())
+        self.assertEqual(processor.accumulator.count, 1)
+
+    def test_reference_grid_unknown_identity_is_terminal(self) -> None:
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid((2, 0, 1)),
+            expected_slice_count=None,
+        )
+        pointer = self._pointer(1)
+        for identity in range(4):
+            self._write_slice(1, identity)
+        self._motion_ready(processor, 1)
+
+        processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertEqual(processor.terminal_volumes, {1})
+        self.assertNotIn(1, processor.pending_volumes)
+        self.assertTrue(os.path.exists(pointer))
+
+    def test_reference_grid_incompatible_plane_shape_is_terminal(self) -> None:
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid((2, 0, 1)),
+            expected_slice_count=None,
+        )
+        pointer = self._pointer(1)
+        self._write_slice(1, 0)
+        self._write_slice(1, 1, pixels=np.ones((2, 4), dtype=np.float32))
+        self._write_slice(1, 2)
+        self._motion_ready(processor, 1)
+
+        processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertEqual(processor.terminal_volumes, {1})
+        self.assertEqual(processor.accumulator.count, 1)
+        self.assertTrue(os.path.exists(pointer))
+
+    def test_reference_grid_duplicate_reference_identity_is_terminal(self) -> None:
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid((2, 0, 0)),
+            expected_slice_count=None,
+        )
+
+        self.assertEqual(processor.terminal_volumes, {0})
+        self.assertEqual(processor.accumulator.count, 0)
+        self.assertIsNone(processor.reference_grid)
+
+    def test_reference_grid_reset_discards_acquisition_map(self) -> None:
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid((2, 0, 1)),
+            expected_slice_count=None,
+        )
+        self.assertIsNotNone(processor.reference_grid)
+
+        processor.reset()
+
+        self.assertIsNone(processor.reference_grid)
+        self.assertEqual(processor.assembly_mode, "reference_grid")
 
     def test_incomplete_volume_remains_pending_then_processes_exactly_once(self) -> None:
         processor = self._processor()
@@ -164,6 +405,148 @@ class TSNRIntegrationTests(unittest.TestCase):
         self.assertEqual(processor.pending_volumes, {3})
         self.assertEqual(processor.processed_volumes, {0})
         self.assertEqual(processor.accumulator.count, 1)
+
+    def test_direction_mismatch_is_terminal_and_never_retried(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer = self._pointer(1)
+        self._write_slice(1, 0)
+        self._write_slice(1, 1)
+        angle = 0.01
+        cosine = float(np.cos(angle))
+        sine = float(np.sin(angle))
+        self._write_slice(
+            1,
+            2,
+            direction=(cosine, -sine, 0.0, sine, cosine, 0.0, 0.0, 0.0, 1.0),
+        )
+        self._motion_ready(processor, 1)
+
+        with (
+            patch.object(
+                processor,
+                "_load_slice_volume",
+                wraps=processor._load_slice_volume,
+            ) as load_volume,
+            patch.object(
+                self.logger,
+                "warning",
+                wraps=self.logger.warning,
+            ) as warning,
+        ):
+            processor.handle_pointer(pointer, expected_slice_count=3)
+            processor.handle_pointer(pointer, expected_slice_count=3)
+            # These are the same entry point used by transform and close-time
+            # retry opportunities.
+            processor.retry_pending(expected_slice_count=3)
+            processor.retry_pending(expected_slice_count=3)
+
+        self.assertEqual(load_volume.call_count, 1)
+        self.assertEqual(processor.terminal_volumes, {1})
+        self.assertNotIn(1, processor.pending_volumes)
+        self.assertNotIn(1, processor.processed_volumes)
+        terminal_messages = [
+            call.args[0]
+            for call in warning.call_args_list
+            if call.args and "terminally rejected" in call.args[0]
+        ]
+        self.assertEqual(len(terminal_messages), 1)
+        self.assertTrue(os.path.exists(pointer))
+        self.assertFalse(
+            os.path.exists(os.path.join(self.input_dir, f"processed_{self.protocol}"))
+        )
+
+    def test_many_terminal_volumes_are_each_loaded_only_once(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        angle = 0.01
+        cosine = float(np.cos(angle))
+        sine = float(np.sin(angle))
+        mismatched_direction = (
+            cosine,
+            -sine,
+            0.0,
+            sine,
+            cosine,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+
+        with patch.object(
+            processor,
+            "_load_slice_volume",
+            wraps=processor._load_slice_volume,
+        ) as load_volume:
+            for volume_number in range(1, 52):
+                pointer = self._pointer(volume_number)
+                self._write_slice(volume_number, 0)
+                self._write_slice(volume_number, 1)
+                self._write_slice(
+                    volume_number,
+                    2,
+                    direction=mismatched_direction,
+                )
+                self._motion_ready(processor, volume_number)
+                processor.handle_pointer(pointer, expected_slice_count=3)
+
+        self.assertEqual(load_volume.call_count, 51)
+        self.assertEqual(processor.terminal_volumes, set(range(1, 52)))
+        self.assertEqual(processor.pending_volumes, set())
+
+    def test_unexpected_load_exception_remains_retryable(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+        pointer = self._write_complete_volume(1)
+        self._motion_ready(processor, 1)
+
+        with patch.object(
+            processor,
+            "_load_slice_volume",
+            side_effect=RuntimeError("unexpected internal failure"),
+        ) as load_volume:
+            processor.handle_pointer(pointer, expected_slice_count=3)
+            processor.retry_pending(expected_slice_count=3)
+
+        self.assertEqual(load_volume.call_count, 2)
+        self.assertEqual(processor.pending_volumes, {1})
+        self.assertEqual(processor.terminal_volumes, set())
+        self.assertNotIn(1, processor.processed_volumes)
+
+    def test_retry_pass_ignores_terminal_but_retries_transient_volume(self) -> None:
+        processor = self._processor()
+        processor.handle_pointer(self._write_reference(), expected_slice_count=None)
+
+        terminal_pointer = self._pointer(1)
+        self._write_slice(1, 0)
+        self._write_slice(1, 1)
+        self._write_slice(
+            1,
+            2,
+            direction=(0.99995, -0.01, 0.0, 0.01, 0.99995, 0.0, 0.0, 0.0, 1.0),
+        )
+        self._motion_ready(processor, 1)
+        processor.handle_pointer(terminal_pointer, expected_slice_count=3)
+
+        transient_pointer = self._pointer(2)
+        self._write_slice(2, 0)
+        self._motion_ready(processor, 2)
+        processor.handle_pointer(transient_pointer, expected_slice_count=3)
+
+        with patch.object(
+            processor,
+            "_load_slice_volume",
+            wraps=processor._load_slice_volume,
+        ) as load_volume:
+            processor.retry_pending(expected_slice_count=3)
+
+        self.assertEqual(
+            [attempt.args[0] for attempt in load_volume.call_args_list],
+            [2],
+        )
+        self.assertEqual(processor.terminal_volumes, {1})
+        self.assertEqual(processor.pending_volumes, {2})
 
     def test_accumulator_failure_retains_pending_volume(self) -> None:
         processor = self._processor(accumulator=FailingAccumulator())
@@ -246,6 +629,7 @@ class TSNRIntegrationTests(unittest.TestCase):
         self.assertEqual(processor.accumulator.count, 0)
         self.assertEqual(processor.pending_volumes, set())
         self.assertEqual(processor.processed_volumes, set())
+        self.assertEqual(processor.terminal_volumes, set())
         self.assertEqual(processor.image_ready_volumes, {})
         self.assertEqual(processor.motion_ready_volumes, {})
         self.assertTrue(os.path.exists(self.output_path))
