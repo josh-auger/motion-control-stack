@@ -21,6 +21,15 @@ RUN /usr/local/cuda/bin/nvcc --version | grep -F "release 11.6, V11.6.124" && \
         exit 1; \
     fi
 
+FROM shared-base-build:devel AS mars-chroot-check-build
+
+COPY tools/mars_chroot_check.cpp /tmp/mars_chroot_check.cpp
+RUN mkdir -p /opt/mars-diagnostics && \
+    g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic \
+        /tmp/mars_chroot_check.cpp \
+        -o /opt/mars-diagnostics/mars-chroot-check \
+        -ldl
+
 FROM shared-base-build:devel AS base
 
 ARG THREADS=1
@@ -231,6 +240,8 @@ COPY --from=slimm-mars /opt/slimm/build/cuda-standalone-registration \
     /opt/moco/bin/cuda-standalone-registration
 COPY --from=slimm-mars /opt/slimm/build/cuda-compat-check \
     /opt/moco/bin/cuda-compat-check
+COPY --from=mars-chroot-check-build /opt/mars-diagnostics/mars-chroot-check \
+    /opt/moco/bin/mars-chroot-check
 COPY --from=slimm-mars /usr/lib/x86_64-linux-gnu/libnlopt_cxx.so.0.10.0 \
     /opt/moco/lib/libnlopt_cxx.so.0
 
