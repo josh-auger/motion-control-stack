@@ -32,6 +32,7 @@ class RegistrationStatusTracker:
         """Clear in-memory acquisition state without replacing published history."""
         self._volumes: dict[int, dict[str, object]] = {}
         self._revision = 0
+        self._published_revision: int | None = None
 
     def set_expected_groups(
         self,
@@ -61,6 +62,7 @@ class RegistrationStatusTracker:
         status: str,
         *,
         transform_filename: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Record one terminal group result, rejecting changes after finalization."""
         if status not in TERMINAL_GROUP_STATUSES:
@@ -69,6 +71,11 @@ class RegistrationStatusTracker:
             raise ValueError("Registered groups require a transform filename.")
         if status != "registered" and transform_filename is not None:
             raise ValueError("Only registered groups may include a transform filename.")
+        if reason is not None:
+            if status == "registered":
+                raise ValueError("Registered groups may not include a failure reason.")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("Group outcome reasons must be nonempty strings.")
 
         volume = self._volume_state(volume_number)
         if volume["registration_finalized"]:
@@ -86,6 +93,8 @@ class RegistrationStatusTracker:
         group_record = {"status": status}
         if transform_filename is not None:
             group_record["transform_filename"] = os.path.basename(transform_filename)
+        if reason is not None:
+            group_record["reason"] = reason
 
         groups = volume["groups"]
         existing = groups.get(group_id)
@@ -99,6 +108,10 @@ class RegistrationStatusTracker:
     def is_finalized(self, volume_number: int) -> bool:
         volume = self._volumes.get(int(volume_number))
         return bool(volume and volume["registration_finalized"])
+
+    def latest_volume_number(self) -> int | None:
+        """Return the newest volume for which any registration state is known."""
+        return max(self._volumes, default=None)
 
     def finalize_volume_if_ready(self, volume_number: int) -> bool:
         """Finalize and publish a volume once every expected group is terminal."""
@@ -135,7 +148,9 @@ class RegistrationStatusTracker:
         for volume_number in sorted(self._volumes):
             if self.finalize_volume_if_ready(volume_number):
                 finalized_now.append(volume_number)
-        if any(volume["registration_finalized"] for volume in self._volumes.values()):
+        if self._published_revision != self._revision and any(
+            volume["registration_finalized"] for volume in self._volumes.values()
+        ):
             self.publish()
         return finalized_now
 
@@ -176,12 +191,23 @@ class RegistrationStatusTracker:
                 os.fchmod(temporary_file.fileno(), 0o644)
             os.replace(temporary_path, self.output_path)
             temporary_path = None
+            self._published_revision = self._revision
         finally:
             if temporary_path is not None:
                 try:
                     os.remove(temporary_path)
                 except FileNotFoundError:
                     pass
+
+    def publish_if_needed(self) -> bool:
+        """Publish only when memory is newer than the durable snapshot."""
+        if (
+            self._published_revision == self._revision
+            and os.path.isfile(self.output_path)
+        ):
+            return False
+        self.publish()
+        return True
 
     def as_document(self) -> dict[str, object]:
         """Return the compact public representation of finalized history."""
@@ -250,6 +276,15 @@ class RegistrationStatusTracker:
                         group_record.get("transform_filename"), str
                     ):
                         raise ValueError("registered group lacks transform filename")
+                    if status != "registered" and "transform_filename" in group_record:
+                        raise ValueError("non-registered group has transform filename")
+                    reason = group_record.get("reason")
+                    if reason is not None and (
+                        status == "registered"
+                        or not isinstance(reason, str)
+                        or not reason.strip()
+                    ):
+                        raise ValueError("invalid group outcome reason")
                     groups[int(group_text)] = dict(group_record)
                 restored[int(volume_text)] = {
                     "expected_groups": set(groups),
@@ -258,6 +293,7 @@ class RegistrationStatusTracker:
                 }
             self._volumes = restored
             self._revision = int(document.get("revision", 0))
+            self._published_revision = self._revision
         except Exception as error:
             self._logger.error(
                 "REG STATUS: failed to restore existing snapshot %s: %s",

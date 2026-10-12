@@ -39,6 +39,7 @@ except ImportError:  # Support execution from the queue_processor application di
 
 
 REGISTRATION_STATUS_FILENAME = "registration_status.json"
+CLOSE_RETRY_INTERVAL_NS = 250_000_000
 
 
 def write_transform_atomically(transform, final_path):
@@ -518,6 +519,10 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
             "expected_group_ids": None,
             "acquisition_closed": False,
             "closed_at_ns": None,
+            "pending_close_path": None,
+            "pending_close_last_attempt_ns": None,
+            "pending_close_last_diagnostic": None,
+            "close_teardown_complete": False,
         }
     state = reset_variables()
     registration_status = RegistrationStatusTracker(
@@ -552,6 +557,12 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
                 continue
             # Skip files that have already been processed
             if f in state["seen_files"]:
+                continue
+            pending_close_path = state["pending_close_path"]
+            if (
+                pending_close_path is not None
+                and f == os.path.basename(pending_close_path)
+            ):
                 continue
 
             full_path = os.path.join(input_dir, f)
@@ -592,16 +603,24 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
         return [f for (f, _) in valid_files]
 
     def pick_newest_files(new_files):
-        """FIFO OFF: keep newest file only, discard older ones."""
+        """FIFO OFF: keep control files plus only the newest pointer."""
+        pointer_files = [
+            filename for filename in new_files
+            if os.path.splitext(filename)[1] == ".txt"
+        ]
+        if not pointer_files:
+            return new_files
         selection_start_ns = time.perf_counter_ns() if profiler is not None else None
         newest = max(
-            new_files,
+            pointer_files,
             key=lambda f: os.path.getmtime(os.path.join(input_dir, f))
         )
         if profiler is not None:
             selection_end_ns = time.perf_counter_ns()
-            profiler.selection(selection_start_ns, selection_end_ns, new_files, newest)
-        for f in new_files:
+            profiler.selection(
+                selection_start_ns, selection_end_ns, pointer_files, newest
+            )
+        for f in pointer_files:
             if f != newest:
                 if profiler is not None and os.path.splitext(f)[1] == ".txt":
                     profiler.decision(f, "skipped_by_lifo", "Old file found. Skipping")
@@ -613,7 +632,10 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
                     profiler.complete(f)
         if profiler is not None:
             profiler.skip_handling(selection_end_ns, time.perf_counter_ns())
-        return [newest]
+        return [
+            filename for filename in new_files
+            if filename == newest or os.path.splitext(filename)[1] != ".txt"
+        ]
 
     def wait_for_complete_write(filepath, max_checks=200, delay=0.005):
         """Poll file size until it is stable for one check. True if stable, False if file disappeared."""
@@ -838,24 +860,125 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
             logging.info("\tReference volume calibration successful!")
             state["reference_volume_flag"] = 1
 
+    def log_close_diagnostic_once(key, message, *args):
+        """Emit one error for an unchanged pending-close failure condition."""
+        if state["pending_close_last_diagnostic"] == key:
+            return
+        state["pending_close_last_diagnostic"] = key
+        logging.error(message, *args)
+
+    def published_pointers_for_groups(volume_number, group_ids):
+        """Return pointer files that still require a real terminal decision."""
+        group_ids = set(group_ids)
+        pointers = []
+        for filename in os.listdir(input_dir):
+            if os.path.splitext(filename)[1] != ".txt":
+                continue
+            match = re.search(r"volume_(\d{4})_group_(\d{4})", filename)
+            if match is None:
+                continue
+            if (
+                int(match.group(1)) == volume_number
+                and int(match.group(2)) in group_ids
+            ):
+                pointers.append(filename)
+        return sorted(pointers)
+
+    def acknowledge_pending_close(filepath):
+        """Delete the close marker only after acquisition-local teardown."""
+        try:
+            os.remove(filepath)
+        except FileNotFoundError:
+            # A retry after an ambiguous unlink result is already acknowledged.
+            pass
+        except Exception as error:
+            log_close_diagnostic_once(
+                ("marker_delete", type(error).__name__, str(error)),
+                "Failed to delete reset trigger file %s: %s",
+                filepath,
+                error,
+            )
+            return False
+
+        state["pending_close_path"] = None
+        state["pending_close_last_attempt_ns"] = None
+        state["pending_close_last_diagnostic"] = None
+        state["close_teardown_complete"] = False
+        state["acquisition_closed"] = True
+        return True
+
     def handle_reset_trigger(filepath):
-        """Handle close trigger file."""
+        """Finalize one pending close request and acknowledge it exactly once."""
         nonlocal profiler
-        logging.info(f"Reset trigger detected : {os.path.basename(filepath)}")
+        if state["close_teardown_complete"]:
+            return acknowledge_pending_close(filepath)
+
         try:
             registration_status.finalize_all_ready()
             unfinalized = registration_status.unfinalized_volumes()
             if unfinalized:
-                logging.error(
-                    "REG STATUS: refusing acquisition close; volumes lack terminal "
-                    "group decisions: %s",
+                latest_volume = registration_status.latest_volume_number()
+                non_tail = {
+                    volume_number: missing_groups
+                    for volume_number, missing_groups in unfinalized.items()
+                    if volume_number != latest_volume
+                }
+                tail_missing = unfinalized.get(latest_volume, [])
+                if non_tail or not tail_missing:
+                    blocked = non_tail or {latest_volume: tail_missing}
+                    log_close_diagnostic_once(
+                        ("unresolved_non_tail", repr(blocked)),
+                        "REG STATUS: acquisition close pending; volumes require "
+                        "terminal group decisions: %s",
+                        blocked,
+                    )
+                    return False
+
+                published_pointers = published_pointers_for_groups(
+                    latest_volume, tail_missing
+                )
+                if published_pointers:
+                    log_close_diagnostic_once(
+                        ("published_pointer_pending", tuple(published_pointers)),
+                        "REG STATUS: acquisition close pending; published pointers "
+                        "still require terminal decisions: %s",
+                        published_pointers,
+                    )
+                    return False
+
+                for group_id in tail_missing:
+                    registration_status.record_group(
+                        latest_volume,
+                        group_id,
+                        "failed",
+                        reason="aborted_missing_pointer",
+                    )
+                logging.info(
+                    "REG STATUS: acquisition closed with partial volume %d; "
+                    "terminalized absent groups %s as failed "
+                    "(reason=aborted_missing_pointer)",
+                    latest_volume,
+                    tail_missing,
+                )
+                registration_status.finalize_all_ready()
+
+            unfinalized = registration_status.unfinalized_volumes()
+            if unfinalized:
+                log_close_diagnostic_once(
+                    ("still_unfinalized", repr(unfinalized)),
+                    "REG STATUS: acquisition close pending; volumes remain "
+                    "unfinalized: %s",
                     unfinalized,
                 )
-                return
-            registration_status.publish()
+                return False
+            registration_status.publish_if_needed()
         except Exception as error:
-            logging.error("REG STATUS: close publication failed: %s", error)
-            return
+            log_close_diagnostic_once(
+                ("close_publication", type(error).__name__, str(error)),
+                "REG STATUS: close publication failed; close remains pending: %s",
+                error,
+            )
+            return False
 
         # Finish profiler and in-memory acquisition teardown before deleting the
         # marker. Marker deletion is the external DONE acknowledgement to FIRE.
@@ -868,24 +991,63 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
         # export_motion_table_csv(input_dir)
 
         # Reset all state
-        nonlocal_state = reset_variables()
-        state.update(nonlocal_state)
-        state["acquisition_closed"] = True
-        state["closed_at_ns"] = time.time_ns()
+        close_path = state["pending_close_path"] or filepath
+        close_attempt_ns = state["pending_close_last_attempt_ns"]
+        closed_at_ns = time.time_ns()
+        state.update(reset_variables())
+        state["pending_close_path"] = close_path
+        state["pending_close_last_attempt_ns"] = close_attempt_ns
+        state["close_teardown_complete"] = True
+        state["closed_at_ns"] = closed_at_ns
         logging.info(
             "Queue DONE: terminal status/profiling complete; acknowledging %s",
             os.path.basename(filepath),
         )
-        try:
-            os.remove(filepath)
-        except Exception as e:
-            logging.error(f"Failed to delete reset trigger file {filepath}: {e}")
-        return
+        return acknowledge_pending_close(filepath)
+
+    def remember_close_request(filepath):
+        """Make one close marker pending without rediscovering it as new work."""
+        existing = state["pending_close_path"]
+        if existing is None:
+            state["pending_close_path"] = filepath
+            state["seen_files"].add(os.path.basename(filepath))
+            state["pending_close_last_attempt_ns"] = None
+            state["pending_close_last_diagnostic"] = None
+            logging.info("Reset trigger detected : %s", os.path.basename(filepath))
+            return
+        if os.path.abspath(existing) != os.path.abspath(filepath):
+            log_close_diagnostic_once(
+                ("additional_close", os.path.basename(filepath)),
+                "Ignoring additional close marker while %s is pending: %s",
+                os.path.basename(existing),
+                os.path.basename(filepath),
+            )
+
+    def retry_pending_close(force=False):
+        """Retry one retained close at bounded frequency or after useful work."""
+        filepath = state["pending_close_path"]
+        if filepath is None:
+            return False
+        now_ns = time.monotonic_ns()
+        last_attempt_ns = state["pending_close_last_attempt_ns"]
+        if (
+            not force
+            and last_attempt_ns is not None
+            and now_ns - last_attempt_ns < CLOSE_RETRY_INTERVAL_NS
+        ):
+            return False
+        state["pending_close_last_attempt_ns"] = now_ns
+        return handle_reset_trigger(filepath)
 
 
     # Main monitoring loop
     # =====================================================================
     while True:
+        if state["close_teardown_complete"]:
+            retry_pending_close()
+            time.sleep(0.005)
+            continue
+
         if state["acquisition_closed"]:
             # FIRE consolidates only after queue and monitor acknowledgements.
             # Keep finalized state frozen until metadata newer than close proves
@@ -919,6 +1081,7 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
         if not new_files:
             if profiler is not None:
                 profiler.empty_scan(scan_end_ns - scan_start_ns)
+            retry_pending_close()
             time.sleep(0.005)
             continue
 
@@ -947,7 +1110,7 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
 
                 # Handle CLOSE trigger file(s)
                 if ext == ".closeQ":
-                    handle_reset_trigger(new_filepath)
+                    remember_close_request(new_filepath)
                     continue
 
                 # Handle series metadata file
@@ -1092,6 +1255,7 @@ def monitor_directory(input_dir, fifo_flag, reg_engine, persistent_cuda=None,
 
             if profiler is not None:
                 profiler.end_scan(time.perf_counter_ns())
+            retry_pending_close(force=True)
 
 
 def main():

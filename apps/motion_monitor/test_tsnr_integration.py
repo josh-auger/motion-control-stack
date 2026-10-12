@@ -291,6 +291,54 @@ class TSNRIntegrationTests(unittest.TestCase):
         self.assertEqual(processor.terminal_volumes, set())
         self.assertEqual(processor.accumulator.count, 1)
 
+    def test_close_status_does_not_accumulate_or_retire_incomplete_tail(self) -> None:
+        processor = self._processor(assembly_mode="reference_grid")
+        processor.handle_pointer(
+            self._write_reference_grid((2, 0, 1)),
+            expected_slice_count=None,
+        )
+        complete_pointer = self._write_complete_volume(1)
+        self._motion_ready(processor, 1)
+        processor.handle_pointer(complete_pointer, expected_slice_count=3)
+        self.assertEqual(processor.accumulator.count, 2)
+
+        incomplete_pointer = self._pointer(2)
+        incomplete_slices = [self._write_slice(2, index) for index in (0, 1)]
+        status_path = os.path.join(self.input_dir, "registration_status.json")
+        with open(status_path, "w", encoding="utf-8") as status_file:
+            json.dump(
+                {
+                    "schema_version": 1,
+                    "revision": 2,
+                    "volumes": {
+                        "2": {
+                            "registration_finalized": True,
+                            "groups": {
+                                "0": {
+                                    "status": "registered",
+                                    "transform_filename": "alignTransform_0002.tfm",
+                                },
+                                "1": {
+                                    "status": "failed",
+                                    "reason": "aborted_missing_pointer",
+                                },
+                            },
+                        }
+                    },
+                },
+                status_file,
+            )
+
+        self.assertTrue(processor.handle_registration_status(status_path))
+        processor.handle_pointer(incomplete_pointer, expected_slice_count=3)
+        processor.retry_pending(expected_slice_count=3)
+
+        self.assertEqual(processor.accumulator.count, 2)
+        self.assertEqual(processor.processed_volumes, {0, 1})
+        self.assertEqual(processor.pending_volumes, {2})
+        self.assertTrue(os.path.isfile(incomplete_pointer))
+        self.assertTrue(all(os.path.isfile(path) for path in incomplete_slices))
+
     def test_reference_grid_unknown_identity_is_terminal(self) -> None:
         processor = self._processor(assembly_mode="reference_grid")
         processor.handle_pointer(

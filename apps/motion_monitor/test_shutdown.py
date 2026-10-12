@@ -29,9 +29,11 @@ class MotionMonitorShutdownTests(unittest.TestCase):
             close_path.write_text("close")
 
             processor = MagicMock()
-            processor.accumulator = SimpleNamespace(count=0)
-            processor.pending_volumes = set()
-            processor.processed_volumes = set()
+            # Ten completed volumes plus the reference are retained while an
+            # incomplete final volume remains pending at acquisition close.
+            processor.accumulator = SimpleNamespace(count=11)
+            processor.pending_volumes = {11}
+            processor.processed_volumes = set(range(11))
             retirer = MagicMock()
             retirer.mode = "on"
             remove_observations = []

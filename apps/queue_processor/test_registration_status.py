@@ -84,6 +84,42 @@ class RegistrationStatusTrackerTests(unittest.TestCase):
         self.assertTrue(record["registration_finalized"])
         self.assertEqual(set(record["groups"]), {"0", "1"})
 
+    def test_missing_pointer_reason_is_additive_and_survives_reload(self) -> None:
+        self.tracker.set_expected_groups(11, {0, 1})
+        self.tracker.record_group(
+            11,
+            0,
+            "registered",
+            transform_filename="alignTransform_0106_0011-0000.tfm",
+        )
+        self.tracker.record_group(
+            11,
+            1,
+            "failed",
+            reason="aborted_missing_pointer",
+        )
+        self.assertTrue(self.tracker.finalize_volume_if_ready(11))
+
+        missing = self._read_status()["volumes"]["11"]["groups"]["1"]
+        self.assertEqual(
+            missing,
+            {"status": "failed", "reason": "aborted_missing_pointer"},
+        )
+        restored = RegistrationStatusTracker(self.status_path)
+        self.assertTrue(restored.is_finalized(11))
+
+    def test_finalize_all_ready_does_not_rewrite_unchanged_snapshot(self) -> None:
+        self.tracker.set_expected_groups(2, {0})
+        self.tracker.record_group(2, 0, "skipped")
+        self.assertTrue(self.tracker.finalize_volume_if_ready(2))
+        first_stat = os.stat(self.status_path)
+
+        self.assertEqual(self.tracker.finalize_all_ready(), [])
+
+        second_stat = os.stat(self.status_path)
+        self.assertEqual(first_stat.st_ino, second_stat.st_ino)
+        self.assertEqual(first_stat.st_mtime_ns, second_stat.st_mtime_ns)
+
     def test_atomic_publication_always_leaves_valid_canonical_json(self) -> None:
         self.tracker.set_expected_groups(3, {0})
         self.tracker.record_group(3, 0, "skipped")
