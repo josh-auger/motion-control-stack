@@ -1,4 +1,4 @@
-"""Focused tests for monotonic periodic-dashboard scheduling."""
+"""Tests for monotonic periodic-dashboard scheduling."""
 
 import os
 import unittest

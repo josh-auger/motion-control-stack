@@ -1,4 +1,4 @@
-"""Manual real-data tSNR replay; execute directly, never during test discovery."""
+"""Manual real-data tSNR replay, excluded from automated discovery."""
 
 import unittest
 from pathlib import Path

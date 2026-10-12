@@ -1,4 +1,4 @@
-"""Focused tests for the active motion-monitor TSNR orchestration."""
+"""Tests for the active motion-monitor TSNR orchestration."""
 
 import logging
 import json

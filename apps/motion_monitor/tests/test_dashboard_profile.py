@@ -1,4 +1,4 @@
-"""Focused tests for observational motion-dashboard profiling."""
+"""Tests for observational motion-dashboard profiling."""
 
 import csv
 import os

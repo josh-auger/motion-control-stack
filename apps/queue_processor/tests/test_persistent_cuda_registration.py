@@ -5,10 +5,9 @@ import stat
 import tempfile
 import unittest
 
-try:
-    from .persistent_cuda_registration import PersistentCudaRegistrationProcess
-except ImportError:
-    from persistent_cuda_registration import PersistentCudaRegistrationProcess
+from apps.queue_processor.persistent_cuda_registration import (
+    PersistentCudaRegistrationProcess,
+)
 
 
 FAKE_SLIMM = '''#!/usr/bin/env python3

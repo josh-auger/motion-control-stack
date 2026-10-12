@@ -1,4 +1,4 @@
-"""Lightweight tests for the real-time running TSNR helpers."""
+"""Tests for the real-time running TSNR helpers."""
 
 import os
 import tempfile

@@ -1,4 +1,4 @@
-"""Focused tests for the combined motion and running-TSNR dashboard."""
+"""Tests for the combined motion and running-TSNR dashboard."""
 
 import os
 import tempfile

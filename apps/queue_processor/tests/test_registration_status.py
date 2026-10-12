@@ -1,4 +1,4 @@
-"""Focused tests for the queue-to-monitor registration status contract."""
+"""Tests for the queue-to-monitor registration status contract."""
 
 import json
 import logging
