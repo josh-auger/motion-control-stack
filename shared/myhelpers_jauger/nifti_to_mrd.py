@@ -30,6 +30,12 @@ LOGGER = logging.getLogger("nifti_to_mrd")
 IMAGE_HEADER_SIZE = 198
 MRD_NAMESPACE = "http://www.ismrm.org/ISMRMRD"
 LPS_FROM_RAS = np.diag([-1.0, -1.0, 1.0])
+DEFAULT_CONFIG_FILE = "fire_emitter_dcm"
+REQUIRED_DIRECTION_ATTRIBUTES = (
+    "ImageRowDir",
+    "ImageColumnDir",
+    "ImageSliceNormDir",
+)
 
 
 class ConversionError(RuntimeError):
@@ -39,7 +45,7 @@ class ConversionError(RuntimeError):
 @dataclass(frozen=True)
 class ReferenceInfo:
     config: bytes
-    xml: bytes
+    xml: bytes | None
     template_header: ismrmrd.ImageHeader
     image_series_index: int
     image_type: int
@@ -203,6 +209,25 @@ def inspect_reference(path: Path) -> ReferenceInfo:
         raise ConversionError(f"Cannot read reference MRD {path}: {exc}") from exc
 
 
+def default_output_conventions() -> ReferenceInfo:
+    """Return neutral FIRE conventions for reference-free conversion."""
+    header = ismrmrd.ImageHeader()
+    header.version = 1
+    header.flags = 15
+    header.image_type = ismrmrd.IMTYPE_MAGNITUDE
+    header.image_series_index = 0
+    config = DEFAULT_CONFIG_FILE.encode("utf-8")[:1024].ljust(1024, bytes((0,)))
+    return ReferenceInfo(
+        config=config,
+        xml=None,
+        template_header=header,
+        image_series_index=0,
+        image_type=int(ismrmrd.IMTYPE_MAGNITUDE),
+        data_dtype=np.dtype(np.float32),
+        image_count=0,
+    )
+
+
 def derive_geometry(affine_ras: np.ndarray, shape: Sequence[int], metadata: dict[str, Any]) -> Geometry:
     """Translate NIfTI voxel-center geometry from RAS+ coordinates to MRD LPS."""
     affine_lps = np.eye(4, dtype=np.float64)
@@ -327,13 +352,237 @@ def _set_limit(root: ET.Element, namespace: str, name: str, maximum: int) -> Non
     _set_existing(root, namespace, f"{base}/center", 0)
 
 
-def build_xml(
-    reference_xml: bytes,
+def _optional_float(
+    metadata: dict[str, Any],
+    key: str,
+    default: float | None = None,
+    *,
+    positive: bool = False,
+) -> float | None:
+    value = metadata.get(key)
+    if value is None:
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConversionError(f"JSON field {key!r} must be numeric") from exc
+    if not np.isfinite(number) or (positive and number <= 0):
+        qualifier = "positive and finite" if positive else "finite"
+        raise ConversionError(f"JSON field {key!r} must be {qualifier}")
+    return number
+
+
+def _multiband_factor(metadata: dict[str, Any], z_size: int) -> int:
+    value = metadata.get("MultibandAccelerationFactor")
+    if value is not None:
+        try:
+            factor = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ConversionError(
+                "JSON field 'MultibandAccelerationFactor' must be a positive integer"
+            ) from exc
+        if factor < 1 or factor > z_size or factor != float(value):
+            raise ConversionError(
+                "JSON field 'MultibandAccelerationFactor' must be a positive integer"
+            )
+        return factor
+
+    timings = metadata.get("SliceTiming")
+    if isinstance(timings, list) and len(timings) == z_size:
+        numeric = np.asarray(timings, dtype=np.float64)
+        _unique, counts = np.unique(numeric, return_counts=True)
+        if len(counts) and np.all(counts == counts[0]):
+            return int(counts[0])
+    return 1
+
+
+def build_reference_free_xml(
     shape: Sequence[int],
     geometry: Geometry,
     metadata: dict[str, Any],
     nifti_name: str,
 ) -> bytes:
+    """Construct a schema-backed MRD XML header without scanner metadata."""
+    x, y, z, t = (int(value) for value in shape)
+    source_name = (
+        nifti_name[:-7]
+        if nifti_name.lower().endswith(".nii.gz")
+        else Path(nifti_name).stem
+    )
+    protocol = str(
+        metadata.get("ProtocolName")
+        or metadata.get("SeriesDescription")
+        or source_name
+        or "offline_nifti"
+    )
+    measurement_id = f"offline-nifti-{uuid.uuid5(uuid.NAMESPACE_URL, f'{source_name}|{tuple(shape)}')}"
+
+    matrix = ismrmrd.xsd.matrixSizeType(x=x, y=y, z=1)
+    fov = ismrmrd.xsd.fieldOfViewMm(
+        x=float(geometry.fov[0]),
+        y=float(geometry.fov[1]),
+        z=float(geometry.slice_thickness),
+    )
+    encoded_space = ismrmrd.xsd.encodingSpaceType(
+        matrixSize=matrix, fieldOfView_mm=fov
+    )
+    recon_space = ismrmrd.xsd.encodingSpaceType(
+        matrixSize=ismrmrd.xsd.matrixSizeType(x=x, y=y, z=1),
+        fieldOfView_mm=ismrmrd.xsd.fieldOfViewMm(
+            x=float(geometry.fov[0]),
+            y=float(geometry.fov[1]),
+            z=float(geometry.slice_thickness),
+        ),
+    )
+
+    def zero_limit() -> ismrmrd.xsd.limitType:
+        return ismrmrd.xsd.limitType(minimum=0, maximum=0, center=0)
+
+    limits = ismrmrd.xsd.encodingLimitsType(
+        kspace_encoding_step_1=ismrmrd.xsd.limitType(
+            minimum=0, maximum=y - 1, center=y // 2
+        ),
+        kspace_encoding_step_2=zero_limit(),
+        average=zero_limit(),
+        slice=ismrmrd.xsd.limitType(minimum=0, maximum=z - 1, center=0),
+        contrast=zero_limit(),
+        phase=zero_limit(),
+        repetition=ismrmrd.xsd.limitType(minimum=0, maximum=t - 1, center=0),
+        set=zero_limit(),
+        segment=zero_limit(),
+    )
+    echo_train_length = metadata.get("EchoTrainLength")
+    if echo_train_length is not None:
+        original_echo_train_length = echo_train_length
+        try:
+            echo_train_length = int(original_echo_train_length)
+        except (TypeError, ValueError) as exc:
+            raise ConversionError("JSON field 'EchoTrainLength' must be an integer") from exc
+        if echo_train_length < 1 or echo_train_length != float(original_echo_train_length):
+            raise ConversionError("JSON field 'EchoTrainLength' must be a positive integer")
+    encoding = ismrmrd.xsd.encodingType(
+        encodedSpace=encoded_space,
+        reconSpace=recon_space,
+        encodingLimits=limits,
+        trajectory=ismrmrd.xsd.trajectoryType.CARTESIAN,
+        echoTrainLength=echo_train_length,
+    )
+
+    tr = _optional_float(metadata, "RepetitionTime", positive=True)
+    te = _optional_float(metadata, "EchoTime", positive=True)
+    flip = _optional_float(metadata, "FlipAngle")
+    echo_spacing = _optional_float(metadata, "EffectiveEchoSpacing", positive=True)
+    sequence_type = metadata.get("PulseSequenceName") or metadata.get("ScanningSequence")
+    sequence = ismrmrd.xsd.sequenceParametersType(
+        TR=[] if tr is None else [tr * 1000.0],
+        TE=[] if te is None else [te * 1000.0],
+        flipAngle_deg=[] if flip is None else [flip],
+        sequence_type=None if sequence_type is None else str(sequence_type),
+        echo_spacing=[] if echo_spacing is None else [echo_spacing * 1000.0],
+    )
+
+    multiband_factor = _multiband_factor(metadata, z)
+    spacing_between_slices = _optional_float(
+        metadata,
+        "SpacingBetweenSlices",
+        default=float(geometry.spacing[2]),
+        positive=True,
+    )
+    strings = [
+        ismrmrd.xsd.userParameterStringType(
+            name="NIfTIToMRDConverter",
+            value="shared/myhelpers_jauger/nifti_to_mrd.py",
+        ),
+        ismrmrd.xsd.userParameterStringType(name="SourceNIfTI", value=nifti_name),
+    ]
+    if metadata.get("PhaseEncodingDirection") is not None:
+        strings.append(
+            ismrmrd.xsd.userParameterStringType(
+                name="NIfTIPhaseEncodingDirection",
+                value=str(metadata["PhaseEncodingDirection"]),
+            )
+        )
+    user_parameters = ismrmrd.xsd.userParametersType(
+        userParameterLong=[
+            ismrmrd.xsd.userParameterLongType(
+                name="MultiBandFactor", value=multiband_factor
+            )
+        ],
+        userParameterDouble=[
+            ismrmrd.xsd.userParameterDoubleType(
+                name="SpacingBetweenSlices", value=spacing_between_slices
+            )
+        ],
+        userParameterString=strings,
+    )
+
+    field_strength = _optional_float(
+        metadata, "MagneticFieldStrength", default=0.0, positive=True
+    )
+    system = ismrmrd.xsd.acquisitionSystemInformationType(
+        systemVendor=str(metadata.get("Manufacturer") or "Unknown"),
+        systemModel=str(metadata.get("ManufacturersModelName") or "Unknown"),
+        systemFieldStrength_T=field_strength,
+    )
+    patient_position = None
+    if metadata.get("PatientPosition") is not None:
+        try:
+            patient_position = ismrmrd.xsd.patientPositionType(
+                str(metadata["PatientPosition"])
+            )
+        except ValueError:
+            LOGGER.warning(
+                "Ignoring unsupported PatientPosition value %r",
+                metadata["PatientPosition"],
+            )
+    measurement = ismrmrd.xsd.measurementInformationType(
+        measurementID=measurement_id,
+        patientPosition=patient_position,
+        protocolName=protocol,
+        sequenceName=(
+            None
+            if metadata.get("PulseSequenceName") is None
+            else str(metadata["PulseSequenceName"])
+        ),
+        seriesDescription=(
+            None
+            if metadata.get("SeriesDescription") is None
+            else str(metadata["SeriesDescription"])
+        ),
+    )
+    frequency = _optional_float(metadata, "ImagingFrequency", positive=True)
+    experimental = None
+    if frequency is not None:
+        experimental = ismrmrd.xsd.experimentalConditionsType(
+            H1resonanceFrequency_Hz=int(round(frequency * 1_000_000.0))
+        )
+
+    header = ismrmrd.xsd.ismrmrdHeader(
+        version=1,
+        measurementInformation=measurement,
+        acquisitionSystemInformation=system,
+        experimentalConditions=experimental,
+        encoding=[encoding],
+        sequenceParameters=sequence,
+        userParameters=user_parameters,
+    )
+    xml = ismrmrd.xsd.ToXML(header).encode("utf-8")
+    try:
+        ismrmrd.xsd.CreateFromDocument(xml.decode("utf-8"))
+    except Exception as exc:
+        raise ConversionError(f"Generated MRD XML is invalid: {exc}") from exc
+    return xml + bytes((0,))
+
+
+def build_xml(
+    reference_xml: bytes | None,
+    shape: Sequence[int],
+    geometry: Geometry,
+    metadata: dict[str, Any],
+    nifti_name: str,
+) -> bytes:
+    if reference_xml is None:
+        return build_reference_free_xml(shape, geometry, metadata, nifti_name)
     try:
         root = ET.fromstring(_without_nul(reference_xml))
     except ET.ParseError as exc:
@@ -396,7 +645,19 @@ def build_xml(
     return xml + bytes((0,))
 
 
-def build_attribute(metadata: dict[str, Any]) -> bytes:
+def _format_meta_vector(values: Sequence[float]) -> list[str]:
+    return [f"{float(value):.18f}" for value in values]
+
+
+def build_attribute(
+    metadata: dict[str, Any], header: ismrmrd.ImageHeader
+) -> bytes:
+    """Build FIRE-compatible per-image Meta attributes.
+
+    FIRE negates ``ImageSliceNormDir`` when constructing its image direction
+    matrix.  Storing the negative header slice direction therefore makes the
+    resulting FIRE matrix exactly ``[read_dir, phase_dir, slice_dir]``.
+    """
     meta = ismrmrd.Meta()
     meta["DataRole"] = "Image"
     meta["ImageProcessingHistory"] = ["NIFTI_TO_MRD", "PYTHON"]
@@ -406,7 +667,79 @@ def build_attribute(metadata: dict[str, Any]) -> bytes:
     )
     if metadata.get("PhaseEncodingDirection") is not None:
         meta["NIfTIPhaseEncodingDirection"] = str(metadata["PhaseEncodingDirection"])
+    meta["ImageRowDir"] = _format_meta_vector(header.read_dir)
+    meta["ImageColumnDir"] = _format_meta_vector(header.phase_dir)
+    meta["ImageSliceNormDir"] = _format_meta_vector(
+        [-float(value) for value in header.slice_dir]
+    )
+    meta["SlicePosLightMarker"] = _format_meta_vector(header.position)
+    if metadata.get("RepetitionTime") is not None:
+        meta["RepetitionTime"] = f"{float(metadata['RepetitionTime']) * 1000.0:.12g}"
+    if metadata.get("EchoTime") is not None:
+        meta["EchoTime"] = f"{float(metadata['EchoTime']) * 1000.0:.12g}"
+    sequence_description = metadata.get("SeriesDescription") or metadata.get(
+        "ProtocolName"
+    )
+    if sequence_description is not None:
+        meta["SequenceDescription"] = str(sequence_description)
     return meta.serialize().encode("utf-8")
+
+
+def _meta_vector(meta: ismrmrd.Meta, key: str) -> np.ndarray:
+    if key not in meta.keys():
+        raise ConversionError(f"Image attribute payload is missing required field {key!r}")
+    values = meta[key]
+    if not isinstance(values, list) or len(values) != 3:
+        raise ConversionError(f"Image attribute {key!r} must contain three values")
+    try:
+        vector = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ConversionError(f"Image attribute {key!r} must be numeric") from exc
+    if vector.shape != (3,) or not np.all(np.isfinite(vector)):
+        raise ConversionError(f"Image attribute {key!r} must contain three finite values")
+    return vector
+
+
+def validate_image_attribute(
+    attribute: bytes, header: ismrmrd.ImageHeader
+) -> ismrmrd.Meta:
+    """Decode and validate the image geometry metadata required by FIRE."""
+    try:
+        payload = _without_nul(attribute).decode("utf-8")
+        meta = ismrmrd.Meta.deserialize(payload)
+    except Exception as exc:
+        raise ConversionError(f"Image attribute payload is not valid ISMRMRD Meta XML: {exc}") from exc
+
+    row = _meta_vector(meta, "ImageRowDir")
+    column = _meta_vector(meta, "ImageColumnDir")
+    slice_normal = _meta_vector(meta, "ImageSliceNormDir")
+    expected = (
+        np.asarray(header.read_dir, dtype=np.float64),
+        np.asarray(header.phase_dir, dtype=np.float64),
+        -np.asarray(header.slice_dir, dtype=np.float64),
+    )
+    for key, actual, wanted in zip(
+        REQUIRED_DIRECTION_ATTRIBUTES, (row, column, slice_normal), expected
+    ):
+        if not np.allclose(actual, wanted, atol=1e-6, rtol=0.0):
+            raise ConversionError(
+                f"Image attribute {key!r} is inconsistent with the MRD image header"
+            )
+
+    # This is the exact matrix construction performed by FIRE's
+    # handleData.get_image_direction_matrix().
+    fire_matrix = np.column_stack((row, column, -slice_normal))
+    header_matrix = np.column_stack(
+        (header.read_dir, header.phase_dir, header.slice_dir)
+    )
+    if not np.allclose(fire_matrix, header_matrix, atol=1e-6, rtol=0.0):
+        raise ConversionError("FIRE image direction matrix does not match the MRD header")
+    position = _meta_vector(meta, "SlicePosLightMarker")
+    if not np.allclose(position, header.position, atol=1e-4, rtol=0.0):
+        raise ConversionError(
+            "Image attribute 'SlicePosLightMarker' is inconsistent with the MRD header"
+        )
+    return meta
 
 
 def _slice_position(geometry: Geometry, shape: Sequence[int], z_index: int) -> np.ndarray:
@@ -485,7 +818,6 @@ def write_mrd(
     nifti_name: str,
 ) -> None:
     x, y, z_size, t_size = (int(value) for value in image.shape)
-    attribute = build_attribute(metadata)
     xml = build_xml(reference.xml, image.shape, geometry, metadata, nifti_name)
     little_dtype = np.dtype(dtype).newbyteorder("<")
     with h5py.File(output, "w") as h5file:
@@ -497,6 +829,7 @@ def write_mrd(
                 header = build_header(
                     reference, image.shape, geometry, dtype, metadata, z_index, repetition
                 )
+                attribute = build_attribute(metadata, header)
                 # NIfTI uses (X,Y); MRD bytes are (channel,z,Y,X), with X fastest.
                 source_slice = source_data[:, :, z_index, repetition]
                 serialized = np.ascontiguousarray(source_slice.T, dtype=little_dtype)
@@ -580,7 +913,7 @@ def validate_output(
         for image_number, name in enumerate(names):
             repetition = image_number // int(image.shape[2])
             expected_slice = int(order[image_number % int(image.shape[2])])
-            header, _attribute, data = read_image(h5file[name])
+            header, attribute, data = read_image(h5file[name])
             if (int(header.repetition), int(header.slice)) != (repetition, expected_slice):
                 raise ConversionError(
                     f"Output ordering error in {name}: got repetition/slice "
@@ -607,6 +940,7 @@ def validate_output(
                 header.field_of_view, expected_fov, atol=1e-4, rtol=0.0
             ):
                 raise ConversionError(f"Output field-of-view mismatch in {name}")
+            validate_image_attribute(attribute, header)
             source = source_data[:, :, expected_slice, repetition]
             restored = data[0, 0].T
             if not np.array_equal(restored, source):
@@ -620,13 +954,24 @@ def validate_output(
 
 def convert(
     nifti_path: Path | str,
-    reference_path: Path | str,
-    output_path: Path | str,
+    reference_path: Path | str | None = None,
+    output_path: Path | str | None = None,
     json_path: Path | str | None = None,
     overwrite: bool = False,
 ) -> ConversionResult:
+    # Preserve the original positional API: convert(nifti, reference, output).
+    # Reference-free callers may use convert(nifti, output) or output_path=...
+    if output_path is None:
+        if reference_path is None:
+            raise ConversionError("An output path is required")
+        output_path = reference_path
+        reference_path = None
     nifti_path = Path(nifti_path).expanduser().resolve()
-    reference_path = Path(reference_path).expanduser().resolve()
+    reference_path = (
+        Path(reference_path).expanduser().resolve()
+        if reference_path is not None
+        else None
+    )
     output_path = Path(output_path).expanduser().resolve()
     json_path = (
         Path(json_path).expanduser().resolve() if json_path is not None else discover_json(nifti_path)
@@ -637,14 +982,20 @@ def convert(
         raise ConversionError(f"Output path is a directory: {output_path}")
     if not output_path.parent.is_dir():
         raise ConversionError(f"Output directory does not exist: {output_path.parent}")
-    if output_path in (nifti_path, reference_path, json_path):
+    if output_path in tuple(
+        path for path in (nifti_path, reference_path, json_path) if path is not None
+    ):
         raise ConversionError("Output path must differ from every input path")
 
     LOGGER.info("Reading NIfTI and metadata")
     image = load_nifti(nifti_path)
     metadata = load_json(json_path)
-    LOGGER.info("Inspecting FIRE reference MRD")
-    reference = inspect_reference(reference_path)
+    if reference_path is None:
+        LOGGER.info("Using reference-free FIRE metadata conventions")
+        reference = default_output_conventions()
+    else:
+        LOGGER.info("Inspecting FIRE reference MRD")
+        reference = inspect_reference(reference_path)
     geometry = derive_geometry(image.affine, image.shape, metadata)
     order = slice_order_from_metadata(metadata, int(image.shape[2]))
     source_dtype = _scaled_dtype(image)
@@ -694,7 +1045,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--json", dest="json_path", type=Path,
         help="JSON sidecar (default: same basename as --nifti)",
     )
-    parser.add_argument("--reference-mrd", required=True, type=Path, help="FIRE reference .hdf5")
+    parser.add_argument(
+        "--reference-mrd",
+        type=Path,
+        help="Optional FIRE reference .hdf5 for legacy template-assisted conversion",
+    )
     parser.add_argument("--output", required=True, type=Path, help="Output .hdf5 path")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output")
     return parser
@@ -706,8 +1061,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         result = convert(
             args.nifti,
-            args.reference_mrd,
-            args.output,
+            reference_path=args.reference_mrd,
+            output_path=args.output,
             json_path=args.json_path,
             overwrite=args.overwrite,
         )

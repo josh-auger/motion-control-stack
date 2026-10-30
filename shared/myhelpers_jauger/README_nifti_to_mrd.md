@@ -12,6 +12,20 @@ The helper uses the repository's existing Python dependencies: `numpy`,
 
 ## Usage
 
+Reference-free conversion is the default:
+
+```bash
+python shared/myhelpers_jauger/nifti_to_mrd.py \
+  --nifti /path/to/scan.nii.gz \
+  --json /path/to/scan.json \
+  --output /path/to/converted.hdf5
+```
+
+`--json` may be omitted when the sidecar has the NIfTI basename. Existing
+outputs are protected unless `--overwrite` is supplied.
+
+The legacy reference-assisted path remains available:
+
 ```bash
 python shared/myhelpers_jauger/nifti_to_mrd.py \
   --nifti /path/to/scan.nii.gz \
@@ -20,20 +34,31 @@ python shared/myhelpers_jauger/nifti_to_mrd.py \
   --output /path/to/converted.hdf5
 ```
 
-`--json` may be omitted when the sidecar has the NIfTI basename. Existing
-outputs are protected unless `--overwrite` is supplied. The reference is
-required and must be a FIRE raw-layout HDF5 file with one image series,
-root `Config File` and `Metadata XML` datasets, and at least one complete
-`image_N/{header,attribute,data}` group.
+An optional reference must use the FIRE raw layout, contain one image series,
+and provide root `Config File` and `Metadata XML` datasets plus complete
+`image_N/{header,attribute,data}` groups.
 
 The October 6 validation command is:
 
 ```bash
 python shared/myhelpers_jauger/nifti_to_mrd.py \
   --nifti /home/jauger/Radiology_Research/Scan_data/20261006_MRN6045885_handmotor_1_baseline/fromResearchSynapse_DICOMS_20261006/6045885-3-converted/6045885/20261006/joshauger_motioncorrection_handmotor_sesh1_baseline/18/func-bold_task-rest480_run-01_slimmon/func-bold_task-rest480_run-01_slimmon_func-bold_task-rest480_run-01_SLIMMON_20261006143118_18.nii.gz \
-  --reference-mrd /home/jauger/Radiology_Research/Scan_data/20261006_MRN6045885_handmotor_1_baseline/fromPythonFireServer_20261006/savedData_20261006T191516_func-bold_task-rest480_run-01_SLIMMON/measurement-20261006T191403.hdf5 \
-  --output /tmp/nifti_to_mrd_oct6_validation.hdf5
+  --output /home/jauger/Radiology_Research/Scan_data/20261006_MRN6045885_handmotor_1_baseline/dataConversionTesting_Nifti_to_MRD_rest480_run02/nifti_to_mrd_oct6_reference_free_v3.hdf5
 ```
+
+## Input metadata
+
+The sidecar must be a JSON object, but no individual JSON key is mandatory:
+matrix size, voxel geometry, and datatype come from NIfTI. `ProtocolName` or
+`SeriesDescription` is preferred; the NIfTI basename is the fallback protocol.
+Useful optional fields include `RepetitionTime`, `EchoTime`, `FlipAngle`,
+`SliceTiming`, `SliceThickness`, `SpacingBetweenSlices`,
+`MultibandAccelerationFactor`, `MagneticFieldStrength`, `Manufacturer`,
+`ManufacturersModelName`, `PatientPosition`, `PulseSequenceName`,
+`EffectiveEchoSpacing`, `EchoTrainLength`, and `PhaseEncodingDirection`.
+Provided numeric values must be finite and physically valid. Missing slice
+timing produces ascending-Z ordering; missing multiband information defaults to
+one unless a uniform factor can be derived from `SliceTiming`.
 
 ## Data, ordering, and geometry
 
@@ -59,14 +84,30 @@ is matrix size times affine spacing, and header FOV Z is JSON `SliceThickness`
 affines are supported without resampling. Sheared affines are rejected because
 MRD image direction cosines cannot represent shear exactly.
 
-The copied XML structure is updated for reconstructed matrix/FOV, slice and
-repetition limits, protocol, scanner fields, TR, TE, and flip angle. BIDS times
-in seconds are converted to the MRD XML convention of milliseconds. Image
-attributes are newly generated and do not copy scanner miniheaders. When TR
-exists, `acquisition_time_stamp` is a relative value derived in standard
+In reference-free mode the MRD XML is constructed with the installed ISMRMRD
+schema classes. It contains reconstructed/encoded matrix and FOV, Cartesian
+encoding, slice and repetition limits, protocol/system descriptions, available
+sequence parameters, multiband factor, spacing between slices, and converter
+provenance. BIDS times in seconds are converted to MRD milliseconds. The root
+`Config File` is the 1,024-byte FIRE application default `fire_emitter_dcm`.
+The optional legacy path instead updates the supplied reference XML and copies
+its config payload.
+
+Image attributes are generated directly and never copy scanner miniheaders.
+When TR exists, `acquisition_time_stamp` is a relative value derived in standard
 2.5 ms ticks from TR and SliceTiming; it is not a wall-clock acquisition time.
-Scanner measurement/study identifiers are replaced with synthetic offline
-identifiers, and image `measurement_uid` is zero.
+Measurement identifiers are explicitly synthetic, and image `measurement_uid`
+is zero.
+
+Every image attribute payload includes `ImageRowDir`, `ImageColumnDir`, and
+`ImageSliceNormDir`, which FIRE requires when establishing its reference image
+coordinate frame. Row and column directions match the MRD header `read_dir`
+and `phase_dir`; `ImageSliceNormDir` is the negative of header `slice_dir`
+because FIRE negates that metadata field when building its direction matrix.
+`SlicePosLightMarker` matches header `position`. Repetition time, echo time,
+and sequence description are populated from the JSON sidecar when available.
+All vectors are serialized as three finite numeric strings using ISMRMRD Meta
+XML, decoded again during output validation, and checked against each header.
 
 ## FIRE reference findings
 
@@ -109,7 +150,10 @@ Known limitations:
 - a reference with multiple image series or encodings is rejected;
 - Siemens private scanner slice numbers and absolute acquisition timestamps
   are not recoverable from NIfTI and are not fabricated;
+- private ICE miniheaders, coil descriptions, waveform data, patient/study
+  identifiers, and scanner measurement dependencies are omitted;
 - the raw FIRE HDF5 layout is intentionally not the standard compound-dataset
   layout used by `ismrmrd.Dataset`;
-- existing replay utilities may still require a transport adapter that emits
-  these stored image records as MRD wire messages.
+- replay requires the raw-layout FIRE sender used for the validated offline
+  workflow; the generic compound-dataset `ismrmrd.Dataset` client is not a
+  reader for this archival layout.
