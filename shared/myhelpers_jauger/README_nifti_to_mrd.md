@@ -84,6 +84,78 @@ is matrix size times affine spacing, and header FOV Z is JSON `SliceThickness`
 affines are supported without resampling. Sheared affines are rejected because
 MRD image direction cosines cannot represent shear exactly.
 
+## Optional in-plane origin correction
+
+`--inplane-origin-correction-voxels X Y` applies a physical translation to
+every MRD image position. `X` is measured along the converted image's
+`read_dir`; `Y` is measured along its `phase_dir`. The displacement is
+
+```text
+X * spacing_x * read_dir + Y * spacing_y * phase_dir
+```
+
+in LPS millimeters. The default is `0 0`, which is byte-identical to omitting
+the option and preserves the original geometry. For example:
+
+```bash
+python3 shared/myhelpers_jauger/nifti_to_mrd.py \
+  --nifti /path/to/scan.nii.gz \
+  --json /path/to/scan.json \
+  --output /path/to/scan_halfvoxel_corrected.hdf5 \
+  --inplane-origin-correction-voxels 0.5 -0.5
+```
+
+Only header `position` and its duplicate `SlicePosLightMarker` attribute are
+translated. Pixel arrays, dimensions, spacing, direction vectors, FOV, slice
+ordering, timing, indices, and other metadata are unchanged.
+
+For the 2026-10-15 REF acquisition, the measured converted-to-native index
+mapping had residual `(-0.5000025, -0.4998563, -0.0000105)` relative to the
+ideal X-preserving/Y-reflecting mapping. Because the converted Y direction is
+reflected relative to native, cancelling the two in-plane residuals requires
+`(+0.5, -0.5)` in the converted basis, not `(+0.5, +0.5)`. With its oblique
+3 mm directions, that correction is an LPS displacement of approximately
+`(+1.587035, +1.395713, +0.182501)` mm.
+
+The exact validated conversion command was:
+
+```bash
+python3 shared/myhelpers_jauger/nifti_to_mrd.py \
+  --nifti /home/jauger/Radiology_Research/Scan_data/20261015_MRN6045885_handmotor_3_pMoCo/fromResearchSynapse_20261015/6045885-3-converted/6045885/20261015/joshauger_motioncorrection_20261008_2/11/ep2d_bold_fire_nomoco_tr1210_ref/ep2d_bold_fire_nomoco_tr1210_ref_ep2d_bold_fire_noMoCo_tr1210_ref_20261015134642_11.nii.gz \
+  --json /home/jauger/Radiology_Research/Scan_data/20261015_MRN6045885_handmotor_3_pMoCo/fromResearchSynapse_20261015/6045885-3-converted/6045885/20261015/joshauger_motioncorrection_20261008_2/11/ep2d_bold_fire_nomoco_tr1210_ref/ep2d_bold_fire_nomoco_tr1210_ref_ep2d_bold_fire_noMoCo_tr1210_ref_20261015134642_11.json \
+  --output /home/jauger/Radiology_Research/Scan_data/20261015_MRN6045885_handmotor_3_pMoCo/fromNiftiToMRDConverter_20261102/ref_convertedMRD_halfvoxel_corrected.hdf5 \
+  --inplane-origin-correction-voxels 0.5 -0.5
+```
+
+Direct comparison with `func_handmotor_run02_REF_convertedMRD.hdf5` verified
+all 6,400 pixel payloads, config/XML, directions, FOV, ordering, and nonposition
+header/attribute fields were identical. Every header changed only `position`,
+and every attribute changed only `SlicePosLightMarker`. Float32 header storage
+produced a maximum displacement error of `6.32e-6` mm.
+
+A complete offline FIRE replay produced
+`data/savedData_20261102T190917_ep2d_bold_fire_noMoCo_tr1210_ref`. The comparison
+report is in `data/image_comparison_REF_native_vs_halfvoxel_corrected`:
+
+| Metric | Original converted REF | Half-voxel corrected REF |
+| --- | ---: | ---: |
+| Matched image pairs | 6,381 | 6,381 |
+| Mean coordinate discrepancy | 2.121014886 mm | 0.000431798 mm |
+| Maximum coordinate discrepancy | 2.121023229 mm | 0.000436805 mm |
+| Physical support overlap A / B / IoU | 98.6153% / 98.6149% / 97.2680% | 99.9990% / 99.9985% / 99.9975% |
+| Physical-alignment Pearson correlation | 0.955001349 | 0.998077712 |
+| Physical-alignment MAE / RMSE | 34.688992 / 73.687336 | 6.437691 / 15.493410 |
+
+The remaining roughly `0.00043` mm residual exceeds the comparison utility's
+strict `0.0001` mm lossless-grid tolerance, so it is still classified as
+requiring resampling even though it approaches the index-only reflection
+result. Intensity equality is not expected because the source NIfTI comes from
+downstream enhanced DICOMs rather than the scanner reconstruction.
+
+This correction is dataset-dependent. Do not automatically apply the REF
+offsets to unrelated acquisitions; determine and verify their signs and
+magnitudes in the relevant physical coordinate frames first.
+
 In reference-free mode the MRD XML is constructed with the installed ISMRMRD
 schema classes. It contains reconstructed/encoded matrix and FOV, Cartesian
 encoding, slice and repetition limits, protocol/system descriptions, available

@@ -749,6 +749,31 @@ def _slice_position(geometry: Geometry, shape: Sequence[int], z_index: int) -> n
     return (geometry.affine_lps @ center_index)[:3]
 
 
+def _normalize_inplane_origin_correction(values: Sequence[float]) -> tuple[float, float]:
+    try:
+        correction = tuple(float(value) for value in values)
+    except (TypeError, ValueError) as exc:
+        raise ConversionError(
+            "In-plane origin correction must contain two finite numeric values"
+        ) from exc
+    if len(correction) != 2 or not np.all(np.isfinite(correction)):
+        raise ConversionError(
+            "In-plane origin correction must contain two finite numeric values"
+        )
+    return correction
+
+
+def _corrected_slice_position(
+    geometry: Geometry,
+    shape: Sequence[int],
+    z_index: int,
+    inplane_origin_correction_voxels: Sequence[float],
+) -> np.ndarray:
+    correction = np.asarray(inplane_origin_correction_voxels, dtype=np.float64)
+    displacement = geometry.directions[:, :2] @ (geometry.spacing[:2] * correction)
+    return _slice_position(geometry, shape, z_index) + displacement
+
+
 def _relative_timestamp(metadata: dict[str, Any], repetition: int, z_index: int) -> int:
     """Return a derived relative 2.5 ms tick count, or zero if timing is unavailable."""
     tr = metadata.get("RepetitionTime")
@@ -773,6 +798,7 @@ def build_header(
     metadata: dict[str, Any],
     z_index: int,
     repetition: int,
+    inplane_origin_correction_voxels: Sequence[float] = (0.0, 0.0),
 ) -> ismrmrd.ImageHeader:
     header = ismrmrd.ImageHeader()
     header.version = int(reference.template_header.version) or 1
@@ -784,7 +810,9 @@ def build_header(
         float(geometry.fov[0]), float(geometry.fov[1]), float(geometry.slice_thickness)
     )
     header.channels = 1
-    position = _slice_position(geometry, shape, z_index)
+    position = _corrected_slice_position(
+        geometry, shape, z_index, inplane_origin_correction_voxels
+    )
     header.position = tuple(float(value) for value in position)
     header.read_dir = tuple(float(value) for value in geometry.directions[:, 0])
     header.phase_dir = tuple(float(value) for value in geometry.directions[:, 1])
@@ -816,6 +844,7 @@ def write_mrd(
     dtype: np.dtype,
     order: Sequence[int],
     nifti_name: str,
+    inplane_origin_correction_voxels: Sequence[float] = (0.0, 0.0),
 ) -> None:
     x, y, z_size, t_size = (int(value) for value in image.shape)
     xml = build_xml(reference.xml, image.shape, geometry, metadata, nifti_name)
@@ -827,7 +856,14 @@ def write_mrd(
         for repetition in range(t_size):
             for z_index in order:
                 header = build_header(
-                    reference, image.shape, geometry, dtype, metadata, z_index, repetition
+                    reference,
+                    image.shape,
+                    geometry,
+                    dtype,
+                    metadata,
+                    z_index,
+                    repetition,
+                    inplane_origin_correction_voxels,
                 )
                 attribute = build_attribute(metadata, header)
                 # NIfTI uses (X,Y); MRD bytes are (channel,z,Y,X), with X fastest.
@@ -893,6 +929,7 @@ def validate_output(
     geometry: Geometry,
     order: Sequence[int],
     dtype: np.dtype,
+    inplane_origin_correction_voxels: Sequence[float] = (0.0, 0.0),
 ) -> float:
     expected_count = int(image.shape[2]) * int(image.shape[3])
     max_abs_error = 0.0
@@ -921,7 +958,12 @@ def validate_output(
                 )
             if np.dtype(ismrmrd.get_dtype_from_data_type(header.data_type)) != np.dtype(dtype):
                 raise ConversionError(f"Output datatype mismatch in {name}")
-            expected_position = _slice_position(geometry, image.shape, expected_slice)
+            expected_position = _corrected_slice_position(
+                geometry,
+                image.shape,
+                expected_slice,
+                inplane_origin_correction_voxels,
+            )
             if not np.allclose(header.position, expected_position, atol=1e-4, rtol=0.0):
                 raise ConversionError(f"Output geometry mismatch in {name}")
             header_directions = np.column_stack(
@@ -958,6 +1000,7 @@ def convert(
     output_path: Path | str | None = None,
     json_path: Path | str | None = None,
     overwrite: bool = False,
+    inplane_origin_correction_voxels: Sequence[float] = (0.0, 0.0),
 ) -> ConversionResult:
     # Preserve the original positional API: convert(nifti, reference, output).
     # Reference-free callers may use convert(nifti, output) or output_path=...
@@ -975,6 +1018,9 @@ def convert(
     output_path = Path(output_path).expanduser().resolve()
     json_path = (
         Path(json_path).expanduser().resolve() if json_path is not None else discover_json(nifti_path)
+    )
+    correction = _normalize_inplane_origin_correction(
+        inplane_origin_correction_voxels
     )
     if output_path.exists() and not overwrite:
         raise ConversionError(f"Output already exists (use --overwrite): {output_path}")
@@ -997,6 +1043,18 @@ def convert(
         LOGGER.info("Inspecting FIRE reference MRD")
         reference = inspect_reference(reference_path)
     geometry = derive_geometry(image.affine, image.shape, metadata)
+    correction_mm = geometry.directions[:, :2] @ (
+        geometry.spacing[:2] * np.asarray(correction)
+    )
+    LOGGER.info(
+        "In-plane origin correction: (%g, %g) voxels; LPS displacement "
+        "(%g, %g, %g) mm",
+        correction[0],
+        correction[1],
+        correction_mm[0],
+        correction_mm[1],
+        correction_mm[2],
+    )
     order = slice_order_from_metadata(metadata, int(image.shape[2]))
     source_dtype = _scaled_dtype(image)
     dtype = choose_output_dtype(source_dtype, reference.data_dtype)
@@ -1013,11 +1071,27 @@ def convert(
     temporary = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
     try:
         write_mrd(
-            temporary, image, source_data, metadata, reference, geometry, dtype, order, nifti_path.name
+            temporary,
+            image,
+            source_data,
+            metadata,
+            reference,
+            geometry,
+            dtype,
+            order,
+            nifti_path.name,
+            correction,
         )
         LOGGER.info("Validating structure, geometry, and voxel values")
         max_abs_error = validate_output(
-            temporary, image, source_data, metadata, geometry, order, dtype
+            temporary,
+            image,
+            source_data,
+            metadata,
+            geometry,
+            order,
+            dtype,
+            correction,
         )
         os.replace(temporary, output_path)
     except BaseException:
@@ -1051,6 +1125,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Optional FIRE reference .hdf5 for legacy template-assisted conversion",
     )
     parser.add_argument("--output", required=True, type=Path, help="Output .hdf5 path")
+    parser.add_argument(
+        "--inplane-origin-correction-voxels",
+        nargs=2,
+        type=float,
+        default=(0.0, 0.0),
+        metavar=("X", "Y"),
+        help=(
+            "Signed origin offsets in voxels along the converted image read and "
+            "phase directions (default: 0 0)"
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output")
     return parser
 
@@ -1065,6 +1150,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             output_path=args.output,
             json_path=args.json_path,
             overwrite=args.overwrite,
+            inplane_origin_correction_voxels=args.inplane_origin_correction_voxels,
         )
     except (ConversionError, OSError, ValueError) as exc:
         LOGGER.error("%s", exc)

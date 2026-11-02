@@ -18,7 +18,7 @@ HOST_DATA_DIR="$(pwd)/data"
 WORKDIR="/data"
 
 # Toggle sending moco feedback to the scanner for prospective motion correction ("on", "off")
-MOCO_FLAG="on"
+MOCO_FLAG="off"
 
 # Registration engine determines the backend used for image registration ("sms-mi-reg", "cuda")
 REG_ENGINE="cuda"
