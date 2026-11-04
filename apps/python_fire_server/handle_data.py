@@ -1266,7 +1266,11 @@ class handleData:
         D = self.refImgCoordFrame * spacing
         # logging.info(f"\t\tDirection matrix of image (scaled) : {np.array2string(D, precision=4, separator=',', suppress_small=True)}")
 
-        offset_indices = (size - 1) / 2.0   # indices of center voxel (z y x)
+        # Siemens image positions use the in-plane FOV midpoint (N/2). Keep the
+        # through-plane component at the discrete slice center so a 2-D image
+        # (Nz=1) does not acquire an unintended half-slice displacement.
+        offset_indices = (size - 1) / 2.0   # center indices in (z y x)
+        offset_indices[1:] = size[1:] / 2.0  # N/2 for in-plane (y x)
         offset_indices = np.array([offset_indices[2], offset_indices[1], offset_indices[0]])    # indices of center (x y z)
         logging.info(f"\t\tIndices (in pixels) of center voxel (x y z) : {offset_indices}")
         first_voxel_center = center - D @ offset_indices

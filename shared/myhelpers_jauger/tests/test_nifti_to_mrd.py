@@ -128,7 +128,6 @@ def run_conversion(
     affine: np.ndarray | None = None,
     metadata: dict | None = None,
     use_reference: bool = False,
-    inplane_origin_correction_voxels=(0.0, 0.0),
     **kwargs,
 ):
     nifti, sidecar = make_input(tmp_path, data, affine, metadata, **kwargs)
@@ -140,14 +139,12 @@ def run_conversion(
             reference,
             output,
             json_path=sidecar,
-            inplane_origin_correction_voxels=inplane_origin_correction_voxels,
         )
     else:
         result = converter.convert(
             nifti,
             output,
             json_path=sidecar,
-            inplane_origin_correction_voxels=inplane_origin_correction_voxels,
         )
     return result, nifti, output
 
@@ -226,108 +223,106 @@ def test_ras_to_lps_geometry(tmp_path):
     np.testing.assert_allclose(header.read_dir, [-1, 0, 0], atol=1e-6)
     np.testing.assert_allclose(header.phase_dir, [0, -1, 0], atol=1e-6)
     np.testing.assert_allclose(header.slice_dir, [0, 0, 1], atol=1e-6)
-    np.testing.assert_allclose(header.position, [-13, -27.5, 30], atol=1e-6)
+    np.testing.assert_allclose(header.position, [-14, -29, 30], atol=1e-6)
     np.testing.assert_allclose(header.field_of_view, [8, 18, 3.5], atol=1e-6)
 
 
-def test_explicit_zero_origin_correction_is_byte_identical_to_default(tmp_path):
-    data = np.arange(3 * 4 * 2 * 2, dtype=np.int16).reshape(3, 4, 2, 2)
-    nifti, sidecar = make_input(tmp_path, data)
-    default_output = tmp_path / "default.hdf5"
-    explicit_zero_output = tmp_path / "explicit_zero.hdf5"
-
-    converter.convert(nifti, default_output, json_path=sidecar)
-    converter.convert(
-        nifti,
-        explicit_zero_output,
-        json_path=sidecar,
-        inplane_origin_correction_voxels=(0.0, 0.0),
+def test_ref_72_n_over_two_position_and_fire_round_trip(tmp_path):
+    data = np.arange(72 * 72 * 2, dtype=np.int16).reshape(72, 72, 2, 1)
+    # Real 2026-10-15 DICOM-derived REF affine. Its NIfTI Y axis is reflected
+    # relative to the native MRD Y axis; no correction sign is special-cased.
+    affine_ras = np.array(
+        [
+            [-2.986065387725830, 0.188003718852997, 0.219246029853821, 105.70173645019531],
+            [0.198644429445267, 2.990070343017578, 0.141489192843437, -98.60399627685547],
+            [0.209653526544571, -0.155349314212799, 2.988630533218384, 26.65460205078125],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
     )
 
-    with h5py.File(default_output, "r") as default_file, h5py.File(
-        explicit_zero_output, "r"
-    ) as zero_file:
-        assert set(default_file) == set(zero_file)
-        for name in default_file:
-            if isinstance(default_file[name], h5py.Dataset):
-                assert converter._bytes(default_file[name]) == converter._bytes(
-                    zero_file[name]
-                )
-                continue
-            assert set(default_file[name]) == set(zero_file[name])
-            for field in default_file[name]:
-                assert converter._bytes(default_file[name][field]) == converter._bytes(
-                    zero_file[name][field]
-                )
+    _result, _nifti, output = run_conversion(tmp_path, data, affine_ras)
+    geometry = converter.derive_geometry(affine_ras, data.shape, default_metadata(2))
+    origin_lps = geometry.affine_lps[:3, 3]
+    expected_position = (
+        origin_lps
+        + 36.0 * geometry.affine_lps[:3, 0]
+        + 36.0 * geometry.affine_lps[:3, 1]
+    )
+
+    with h5py.File(output, "r") as h5file:
+        header, attribute, pixels = converter.read_image(h5file["image_0"])
+    np.testing.assert_allclose(
+        header.position,
+        (-4.971516371, -16.189735532, 28.609553695),
+        atol=1e-5,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(header.position, expected_position, atol=1e-5, rtol=0.0)
+    np.testing.assert_array_equal(pixels[0, 0].T, data[:, :, 0, 0])
+    meta = converter.validate_image_attribute(attribute, header)
+    assert meta["SlicePosLightMarker"] == [
+        f"{float(value):.18f}" for value in header.position
+    ]
+
+    # FIRE's revised N/2 interpretation must recover the NIfTI first-voxel center.
+    physical_steps = geometry.directions * geometry.spacing
+    reconstructed_origin = (
+        np.asarray(header.position)
+        - physical_steps[:, 0] * data.shape[0] / 2.0
+        - physical_steps[:, 1] * data.shape[1] / 2.0
+    )
+    np.testing.assert_allclose(reconstructed_origin, origin_lps, atol=1e-5, rtol=0.0)
 
 
-def test_origin_correction_scales_and_follows_oblique_inplane_directions(tmp_path):
+@pytest.mark.parametrize("y_sign", [1.0, -1.0])
+def test_n_over_two_position_follows_oblique_and_reflected_axes(tmp_path, y_sign):
     data = np.arange(4 * 5 * 3, dtype=np.int16).reshape(4, 5, 3, 1)
     angle = 0.37
     affine = np.array(
         [
-            [2 * math.cos(angle), -4 * math.sin(angle), 0, 10],
-            [2 * math.sin(angle), 4 * math.cos(angle), 0, 20],
+            [2 * math.cos(angle), y_sign * -4 * math.sin(angle), 0, 10],
+            [2 * math.sin(angle), y_sign * 4 * math.cos(angle), 0, 20],
             [0, 0, 3, 30],
             [0, 0, 0, 1],
         ]
     )
-    nifti, sidecar = make_input(tmp_path, data, affine=affine)
-    uncorrected = tmp_path / "uncorrected.hdf5"
-    corrected = tmp_path / "corrected.hdf5"
-    correction = (0.5, -0.5)
-    converter.convert(nifti, uncorrected, json_path=sidecar)
-    converter.convert(
-        nifti,
-        corrected,
-        json_path=sidecar,
-        inplane_origin_correction_voxels=correction,
-    )
-
+    _result, _nifti, output = run_conversion(tmp_path, data, affine=affine)
     geometry = converter.derive_geometry(affine, data.shape, default_metadata(3))
-    expected_displacement = (
-        0.5 * geometry.spacing[0] * geometry.directions[:, 0]
-        - 0.5 * geometry.spacing[1] * geometry.directions[:, 1]
+    expected = (
+        geometry.affine_lps[:3, 3]
+        + geometry.affine_lps[:3, 0] * data.shape[0] / 2.0
+        + geometry.affine_lps[:3, 1] * data.shape[1] / 2.0
     )
-    uncorrected_positions = []
-    corrected_positions = []
-    with h5py.File(uncorrected, "r") as base_file, h5py.File(
-        corrected, "r"
-    ) as corrected_file:
-        names = converter.image_group_names(base_file)
-        assert names == converter.image_group_names(corrected_file)
-        for name in names:
-            base_header, base_attribute, base_pixels = converter.read_image(base_file[name])
-            new_header, new_attribute, new_pixels = converter.read_image(
-                corrected_file[name]
-            )
-            np.testing.assert_array_equal(new_pixels, base_pixels)
-            np.testing.assert_allclose(
-                np.asarray(new_header.position) - np.asarray(base_header.position),
-                expected_displacement,
-                atol=1e-5,
-            )
-            np.testing.assert_allclose(new_header.read_dir, base_header.read_dir, atol=0)
-            np.testing.assert_allclose(new_header.phase_dir, base_header.phase_dir, atol=0)
-            np.testing.assert_allclose(new_header.slice_dir, base_header.slice_dir, atol=0)
-            np.testing.assert_allclose(
-                new_header.field_of_view, base_header.field_of_view, atol=0
-            )
-            base_meta = converter.validate_image_attribute(base_attribute, base_header)
-            new_meta = converter.validate_image_attribute(new_attribute, new_header)
-            assert new_meta["SlicePosLightMarker"] == [
-                f"{float(value):.18f}" for value in new_header.position
-            ]
-            for key in converter.REQUIRED_DIRECTION_ATTRIBUTES:
-                assert new_meta[key] == base_meta[key]
-            uncorrected_positions.append(np.asarray(base_header.position))
-            corrected_positions.append(np.asarray(new_header.position))
 
-    np.testing.assert_allclose(
-        np.diff(corrected_positions, axis=0),
-        np.diff(uncorrected_positions, axis=0),
-        atol=1e-5,
+    with h5py.File(output, "r") as h5file:
+        header, _attribute, _pixels = converter.read_image(h5file["image_0"])
+    np.testing.assert_allclose(header.position, expected, atol=1e-5, rtol=0.0)
+
+
+def test_slice_positions_preserve_affine_z_steps_without_half_slice_offset(tmp_path):
+    data = np.zeros((4, 5, 4, 1), dtype=np.int16)
+    affine = np.array(
+        [[2, 0, 0.2, 10], [0, -3, -0.1, 20], [0, 0, 4, 30], [0, 0, 0, 1]],
+        dtype=float,
     )
+    # Use an orthogonal reflected z vector to satisfy the no-shear requirement.
+    affine[:3, 2] = np.cross(affine[:3, 0], affine[:3, 1])
+    affine[:3, 2] *= 4.0 / np.linalg.norm(affine[:3, 2])
+    _result, _nifti, output = run_conversion(tmp_path, data, affine=affine)
+    geometry = converter.derive_geometry(affine, data.shape, default_metadata(4))
+
+    positions = {}
+    with h5py.File(output, "r") as h5file:
+        for name in converter.image_group_names(h5file):
+            header, _attribute, _pixels = converter.read_image(h5file[name])
+            positions[int(header.slice)] = np.asarray(header.position)
+
+    base = geometry.affine_lps[:3, 3]
+    base += geometry.affine_lps[:3, 0] * data.shape[0] / 2.0
+    base += geometry.affine_lps[:3, 1] * data.shape[1] / 2.0
+    for z_index in range(data.shape[2]):
+        expected = base + z_index * geometry.affine_lps[:3, 2]
+        np.testing.assert_allclose(positions[z_index], expected, atol=1e-5, rtol=0.0)
 
 
 @pytest.mark.filterwarnings("ignore:builtin type Swig.*:DeprecationWarning")
@@ -495,33 +490,21 @@ def test_cli_reference_argument_is_optional():
         ["--nifti", "scan.nii.gz", "--output", "converted.hdf5"]
     )
     assert args.reference_mrd is None
-    assert args.inplane_origin_correction_voxels == (0.0, 0.0)
-
-    corrected_args = converter.build_argument_parser().parse_args(
-        [
-            "--nifti",
-            "scan.nii.gz",
-            "--output",
-            "converted.hdf5",
-            "--inplane-origin-correction-voxels",
-            "0.5",
-            "-0.5",
-        ]
-    )
-    assert corrected_args.inplane_origin_correction_voxels == [0.5, -0.5]
+    assert not hasattr(args, "inplane_origin_correction_voxels")
 
 
-@pytest.mark.parametrize("correction", [(1.0,), (1.0, 2.0, 3.0), (float("nan"), 0.0)])
-def test_invalid_origin_correction_is_rejected(tmp_path, correction):
-    data = np.zeros((2, 2, 1, 1), dtype=np.int16)
-    nifti, sidecar = make_input(tmp_path, data)
-
-    with pytest.raises(converter.ConversionError, match="two finite numeric values"):
-        converter.convert(
-            nifti,
-            tmp_path / "out.hdf5",
-            json_path=sidecar,
-            inplane_origin_correction_voxels=correction,
+def test_removed_origin_correction_cli_option_is_rejected():
+    with pytest.raises(SystemExit):
+        converter.build_argument_parser().parse_args(
+            [
+                "--nifti",
+                "scan.nii.gz",
+                "--output",
+                "converted.hdf5",
+                "--inplane-origin-correction-voxels",
+                "0.5",
+                "-0.5",
+            ]
         )
 
 
