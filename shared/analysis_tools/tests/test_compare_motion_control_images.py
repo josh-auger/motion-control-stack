@@ -12,7 +12,10 @@ import SimpleITK as sitk
 
 from shared.analysis_tools.compare_motion_control_images import (
     LoadedImage,
+    _create_diagnostic_figure,
+    _format_intensity_fit_annotation,
     _sitk_geometry,
+    _symmetric_normalized_difference,
     compare_arrays,
     compare_directories,
     compare_physical_space,
@@ -361,6 +364,88 @@ def test_intensity_scale_and_offset_fit_after_alignment():
     assert fit["offset"] == pytest.approx(7.0)
     assert fit["residual_rmse"] == pytest.approx(0.0, abs=1e-10)
     assert "DIFFERENT_INTENSITY_SCALING" in result["statuses"]
+
+
+def test_symmetric_normalized_difference_zero_handling_signs_and_finiteness():
+    native = np.array([0.0, 5.0, 0.0, 8.0, -4.0, 1e308, np.nan, np.inf])
+    converted = np.array([0.0, 0.0, 5.0, 4.0, -2.0, -1e308, 1.0, 2.0])
+    difference = _symmetric_normalized_difference(native, converted)
+
+    assert difference == pytest.approx(
+        [0.0, 200.0, -200.0, 200.0 / 3.0, -200.0 / 3.0, 200.0, 0.0, 0.0]
+    )
+    assert np.all(np.isfinite(difference))
+
+
+def test_symmetric_normalized_difference_is_antisymmetric():
+    native = np.array([[1.0, -2.0], [3.0, -4.0]])
+    converted = np.array([[2.0, -1.0], [-3.0, 4.0]])
+    forward = _symmetric_normalized_difference(native, converted)
+    reverse = _symmetric_normalized_difference(converted, native)
+    assert forward == pytest.approx(-reverse)
+
+
+def test_diagnostic_figure_panel_arrangement_and_fit_annotation():
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    native = np.arange(1, 13, dtype=float).reshape(3, 4)
+    aligned = (native - 1.25) / 0.875
+    fit = {"available": True, "scale": 0.875123456, "offset": 1.251234567}
+    correlation = 0.9980917654
+    physical = {
+        "alignment_method": "lossless_discrete_axis_reorientation",
+        "interpolated": False,
+        "sampling_overlap_percentage_of_a": 100.0,
+        "aligned_intensity_metrics": {"pearson_correlation": correlation},
+        "diagnostic_affine_intensity_fit": fit,
+    }
+    fig, axes = _create_diagnostic_figure(
+        plt,
+        {"image_identifier": "volume:0000"},
+        physical,
+        native,
+        aligned,
+        np.ones_like(native, dtype=bool),
+        aligned.ravel(),
+        native.ravel(),
+    )
+    try:
+        assert axes.shape == (2, 3)
+        assert [[axis.get_title() for axis in row] for row in axes] == [
+            ["Native (A physical grid)", "Converted aligned (B)", "Numerical summary"],
+            [
+                "Absolute intensity difference: A − B",
+                "Normalized difference (%)\n200(A−B)/(|A|+|B|), display saturated at ±100%",
+                "Native vs aligned converted intensity",
+            ],
+        ]
+        annotation = "\n".join(text.get_text() for text in axes[1, 2].texts)
+        assert "Native = 0.875123 × Converted + 1.251235" in annotation
+        assert "Pearson r = 0.998092" in annotation
+        assert len(axes[1, 2].lines) == 1
+        assert axes[0, 0].images[0].get_clim() == axes[0, 1].images[0].get_clim()
+        assert axes[1, 0].images[0].get_clim()[0] == -axes[1, 0].images[0].get_clim()[1]
+        assert axes[1, 1].images[0].get_clim() == (-100.0, 100.0)
+    finally:
+        plt.close(fig)
+
+
+def test_intensity_fit_annotation_reports_unavailable_fit():
+    annotation = _format_intensity_fit_annotation({"available": False}, 0.9123456789)
+    assert annotation == "Least-squares fit unavailable\nPearson r = 0.912346"
+
+
+def test_intensity_fit_annotation_formats_negative_intercept():
+    annotation = _format_intensity_fit_annotation(
+        {"available": True, "scale": 0.5, "offset": -0.5},
+        1.0,
+    )
+    assert annotation == (
+        "Native = 0.500000 × Converted − 0.500000\n"
+        "Pearson r = 1.000000"
+    )
 
 
 def test_integer_valued_vs_fractional_float_diagnostics():

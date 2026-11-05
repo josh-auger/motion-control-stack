@@ -18,6 +18,7 @@ import math
 import os
 import re
 import sys
+import textwrap
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass
@@ -1379,6 +1380,206 @@ def _display_slice(array: np.ndarray) -> np.ndarray:
     return view
 
 
+def _symmetric_normalized_difference(native: np.ndarray, converted: np.ndarray) -> np.ndarray:
+    """Return 200 * (native - converted) / (|native| + |converted|) in percent."""
+    native_float = np.asarray(native, dtype=np.float64)
+    converted_float = np.asarray(converted, dtype=np.float64)
+    scale = np.maximum(np.abs(native_float), np.abs(converted_float))
+    scaled_native = np.zeros_like(native_float)
+    scaled_converted = np.zeros_like(converted_float)
+    nonzero = np.isfinite(native_float) & np.isfinite(converted_float) & (scale != 0.0)
+    np.divide(native_float, scale, out=scaled_native, where=nonzero)
+    np.divide(converted_float, scale, out=scaled_converted, where=nonzero)
+    denominator = np.abs(scaled_native) + np.abs(scaled_converted)
+    result = np.zeros_like(native_float)
+    np.divide(
+        200.0 * (scaled_native - scaled_converted),
+        denominator,
+        out=result,
+        where=denominator != 0.0,
+    )
+    return result
+
+
+def _format_intensity_fit_annotation(fit: dict[str, Any], correlation: float | None) -> str:
+    correlation_text = "N/A" if correlation is None else f"{correlation:.6f}"
+    if not fit.get("available"):
+        return f"Least-squares fit unavailable\nPearson r = {correlation_text}"
+    offset = float(fit["offset"])
+    offset_operator = "+" if offset >= 0.0 else "−"
+    return (
+        f"Native = {fit['scale']:.6f} × Converted {offset_operator} {abs(offset):.6f}\n"
+        f"Pearson r = {correlation_text}"
+    )
+
+
+def _finite_symmetric_limit(values: np.ndarray, fallback: float = 1.0) -> float:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if not finite.size:
+        return fallback
+    limit = float(np.max(np.abs(finite)))
+    return limit if limit > 0.0 else fallback
+
+
+def _shared_intensity_limits(*images: np.ndarray) -> tuple[float, float]:
+    finite_parts = [np.asarray(image, dtype=np.float64)[np.isfinite(image)] for image in images]
+    finite_parts = [part for part in finite_parts if part.size]
+    if not finite_parts:
+        return 0.0, 1.0
+    minimum = min(float(np.min(part)) for part in finite_parts)
+    maximum = max(float(np.max(part)) for part in finite_parts)
+    if minimum == maximum:
+        padding = max(abs(minimum) * 0.01, 1.0)
+        return minimum - padding, maximum + padding
+    return minimum, maximum
+
+
+def _create_diagnostic_figure(
+    plt: Any,
+    row: dict[str, Any],
+    physical: dict[str, Any],
+    native_slice: np.ndarray,
+    aligned_slice: np.ndarray,
+    mask_slice: np.ndarray,
+    scatter_converted: np.ndarray,
+    scatter_native: np.ndarray,
+) -> tuple[Any, np.ndarray]:
+    """Create the diagnostic 2x3 figure without changing comparison results."""
+    native_float = np.asarray(native_slice, dtype=np.float64)
+    aligned_float = np.asarray(aligned_slice, dtype=np.float64)
+    mask_slice = np.asarray(mask_slice, dtype=bool)
+    absolute_difference = np.where(mask_slice, native_float - aligned_float, np.nan)
+    normalized_difference = np.where(
+        mask_slice,
+        _symmetric_normalized_difference(native_float, aligned_float),
+        np.nan,
+    )
+    fit = physical["diagnostic_affine_intensity_fit"]
+    correlation = physical["aligned_intensity_metrics"].get("pearson_correlation")
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8), constrained_layout=True)
+    shared_minimum, shared_maximum = _shared_intensity_limits(native_float, aligned_float)
+    extent = (-0.5, native_float.shape[1] - 0.5, -0.5, native_float.shape[0] - 0.5)
+
+    image_panels = (
+        (axes[0, 0], native_float, "Native (A physical grid)"),
+        (axes[0, 1], aligned_float, "Converted aligned (B)"),
+    )
+    for axis, image, title in image_panels:
+        shown = axis.imshow(
+            image,
+            cmap="gray",
+            origin="lower",
+            extent=extent,
+            vmin=shared_minimum,
+            vmax=shared_maximum,
+        )
+        axis.set_title(title)
+        axis.set_xlabel("SimpleITK x index")
+        axis.set_ylabel("SimpleITK y index")
+        fig.colorbar(shown, ax=axis, shrink=0.72, pad=0.02, label="Intensity")
+
+    axes[0, 2].axis("off")
+    axes[0, 2].set_title("Numerical summary")
+    method_lines = textwrap.wrap(
+        physical["alignment_method"].replace("_", " "),
+        width=32,
+        subsequent_indent="        ",
+    )
+    summary_lines = [
+        f"Identifier: {row['image_identifier']}",
+        f"Method: {method_lines[0]}",
+        *method_lines[1:],
+        f"Interpolated: {physical['interpolated']}",
+        f"Overlap: {physical['sampling_overlap_percentage_of_a']:.3f}%",
+        f"Pearson r: {_format_number(correlation)}",
+        f"Fit slope: {_format_number(fit.get('scale'))}",
+        f"Fit intercept: {_format_number(fit.get('offset'))}",
+    ]
+    axes[0, 2].text(
+        0.0,
+        0.98,
+        "\n".join(summary_lines),
+        va="top",
+        family="monospace",
+        fontsize=9,
+    )
+
+    absolute_limit = _finite_symmetric_limit(absolute_difference)
+    absolute_plot = axes[1, 0].imshow(
+        absolute_difference,
+        cmap="coolwarm",
+        origin="lower",
+        extent=extent,
+        vmin=-absolute_limit,
+        vmax=absolute_limit,
+    )
+    axes[1, 0].set_title("Absolute intensity difference: A − B")
+    axes[1, 0].set_xlabel("SimpleITK x index")
+    axes[1, 0].set_ylabel("SimpleITK y index")
+    fig.colorbar(
+        absolute_plot,
+        ax=axes[1, 0],
+        shrink=0.72,
+        pad=0.02,
+        label="A − aligned B intensity",
+    )
+
+    normalized_plot = axes[1, 1].imshow(
+        normalized_difference,
+        cmap="coolwarm",
+        origin="lower",
+        extent=extent,
+        vmin=-100.0,
+        vmax=100.0,
+    )
+    axes[1, 1].set_title("Normalized difference (%)\n200(A−B)/(|A|+|B|), display saturated at ±100%")
+    axes[1, 1].set_xlabel("SimpleITK x index")
+    axes[1, 1].set_ylabel("SimpleITK y index")
+    finite_normalized = normalized_difference[np.isfinite(normalized_difference)]
+    below_limit = bool(finite_normalized.size and np.min(finite_normalized) < -100.0)
+    above_limit = bool(finite_normalized.size and np.max(finite_normalized) > 100.0)
+    colorbar_extend = "both" if below_limit and above_limit else (
+        "min" if below_limit else "max" if above_limit else "neither"
+    )
+    fig.colorbar(
+        normalized_plot,
+        ax=axes[1, 1],
+        shrink=0.72,
+        pad=0.02,
+        label="Symmetric normalized difference (%)",
+        extend=colorbar_extend,
+    )
+
+    scatter_axis = axes[1, 2]
+    scatter_axis.scatter(scatter_converted, scatter_native, s=2, alpha=0.15)
+    if fit.get("available") and scatter_converted.size:
+        endpoints = np.asarray((np.min(scatter_converted), np.max(scatter_converted)))
+        scatter_axis.plot(endpoints, fit["scale"] * endpoints + fit["offset"], color="red")
+    scatter_axis.set_title("Native vs aligned converted intensity")
+    scatter_axis.set_xlabel("Aligned converted MRD intensity")
+    scatter_axis.set_ylabel("Native MRD intensity")
+    if scatter_native.size:
+        native_minimum = float(np.min(scatter_native))
+        native_maximum = float(np.max(scatter_native))
+        native_span = native_maximum - native_minimum
+        annotation_band = max(native_span * 0.28, max(abs(native_minimum), 1.0) * 0.02)
+        scatter_axis.set_ylim(native_minimum, native_maximum + annotation_band)
+    scatter_axis.text(
+        0.02,
+        0.98,
+        _format_intensity_fit_annotation(fit, correlation),
+        transform=scatter_axis.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8,
+        family="monospace",
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "0.7", "alpha": 0.9},
+    )
+    return fig, axes
+
+
 def generate_diagnostic_visualizations(
     output_dir: Path,
     pair_records: dict[str, tuple[ImageRecord, ImageRecord]],
@@ -1434,53 +1635,23 @@ def generate_diagnostic_visualizations(
         if aligned is None or mask is None:
             continue
         native_slice = _display_slice(native.array)
-        converted_slice = _display_slice(converted.array)
         aligned_slice = _display_slice(aligned)
         mask_slice = _display_slice(mask)
-        difference = np.where(mask_slice, native_slice.astype(float) - aligned_slice.astype(float), np.nan)
         valid = mask & np.isfinite(native.array) & np.isfinite(aligned)
         x = np.asarray(aligned[valid], dtype=float)
         y = np.asarray(native.array[valid], dtype=float)
         if x.size > 10000:
             sample_indices = np.linspace(0, x.size - 1, 10000, dtype=int)
             x, y = x[sample_indices], y[sample_indices]
-        fit = physical["diagnostic_affine_intensity_fit"]
-
-        fig, axes = plt.subplots(2, 3, figsize=(14, 8), constrained_layout=True)
-        panels = (
-            (axes[0, 0], native_slice, "Native (A physical grid)", "gray"),
-            (axes[0, 1], converted_slice, f"Converted original ordering ({physical['orientation_b']})", "gray"),
-            (axes[0, 2], aligned_slice, f"Converted aligned: {physical['alignment_method']}", "gray"),
-            (axes[1, 0], difference, "A − aligned B (overlap only)", "coolwarm"),
-        )
-        for axis, image, title, cmap in panels:
-            shown = axis.imshow(image, cmap=cmap, origin="lower")
-            axis.set_title(title)
-            axis.set_xlabel("SimpleITK x index")
-            axis.set_ylabel("SimpleITK y index")
-            fig.colorbar(shown, ax=axis, shrink=0.75)
-        axes[1, 1].scatter(x, y, s=2, alpha=0.15)
-        if fit.get("available") and x.size:
-            endpoints = np.asarray((np.min(x), np.max(x)))
-            axes[1, 1].plot(endpoints, fit["scale"] * endpoints + fit["offset"], color="red")
-        axes[1, 1].set_title("Intensity fit: native ≈ a·converted + b")
-        axes[1, 1].set_xlabel("Aligned converted")
-        axes[1, 1].set_ylabel("Native")
-        axes[1, 2].axis("off")
-        axes[1, 2].text(
-            0.0,
-            1.0,
-            "\n".join((
-                f"Identifier: {row['image_identifier']}",
-                f"Method: {physical['alignment_method']}",
-                f"Interpolated: {physical['interpolated']}",
-                f"Overlap: {physical['sampling_overlap_percentage_of_a']:.3f}%",
-                f"Correlation: {_format_number(physical['aligned_intensity_metrics']['pearson_correlation'])}",
-                f"Fit scale: {_format_number(fit.get('scale'))}",
-                f"Fit offset: {_format_number(fit.get('offset'))}",
-            )),
-            va="top",
-            family="monospace",
+        fig, _ = _create_diagnostic_figure(
+            plt,
+            row,
+            physical,
+            native_slice,
+            aligned_slice,
+            mask_slice,
+            x,
+            y,
         )
         safe_identifier = row["image_identifier"].replace(":", "-").replace("/", "_")
         destination = figure_dir / f"physical_comparison_{safe_identifier}.png"
