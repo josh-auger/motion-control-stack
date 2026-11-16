@@ -27,7 +27,7 @@ REG_ENGINE="cuda"
 CUDA_EXECUTION_MODE="persistent"
 
 # Registration type determines the grouping of image data (by "slice", "smsgroup", "volume", "by2slices") 
-REG_TYPE="by2slices"
+REG_TYPE="smsgroup"
 
 # Toggle processing data sequentially ("first-in-first-out" = "on") or only the most recent data (FIFO = "off" = "last-in-first-out")
 FIFO_FLAG="off"
