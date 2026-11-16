@@ -46,6 +46,12 @@ FIGURES = [
     ("figure_4_registration_performance.png", "Registration outcomes, excluding reference initialization"),
     ("figure_5_registration_runtime.png", "Full registration-call runtime distributions"),
 ]
+POSITION_FIGURE = ("slice_group_exceedance_by_position.png", "High-motion exceedance by slice-group position")
+POSITION_CSV = "slice_group_exceedance_by_position.csv"
+POSITION_FIELDS = [
+    "subject", "slice_group_index", "transition_type", "valid_transition_count",
+    "above_threshold_count", "exceedance_pct", "mean_displacement_mm", "p95_displacement_mm",
+]
 
 
 def discover_subjects(root: Path) -> list[tuple[str, Path]]:
@@ -416,6 +422,82 @@ def aggregate_subjects(subjects: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def slice_group_exceedance_rows(subjects: list[dict[str, Any]], threshold: float) -> list[dict[str, Any]]:
+    """Summarize existing displacements by explicit current-estimate metadata.
+
+    Verify consecutive volume/group identifiers before classifying transitions;
+    row offsets are never used as group labels. Missing expected slots remain in
+    the chronological sequence but contribute no value to a group's denominator.
+    """
+    output = []
+    for subject in subjects:
+        values = {group: [] for group in range(14)}
+        previous = None
+        seen = set()
+        for row in subject.get("group_rows", []):
+            volume, group = int(row["volume"]), int(row["group"])
+            key = (volume, group)
+            if key in seen:
+                raise AnalysisError(f"Duplicate slice-group position record for {subject['subject']}: {key}")
+            seen.add(key)
+            if row["is_reference"]:
+                if previous is not None or key != (0, 14) or row["group_displacement_mm"] is not None:
+                    raise AnalysisError("Expected one initial identity baseline with undefined displacement")
+            else:
+                if volume < 1 or group not in values or previous is None:
+                    raise AnalysisError(f"Invalid slice-group transition metadata: {key}")
+                expected_previous = (volume, group - 1) if group else ((0, 14) if volume == 1 else (volume - 1, 13))
+                if (int(previous["volume"]), int(previous["group"])) != expected_previous:
+                    raise AnalysisError(f"Nonconsecutive acquisition metadata before {key}: expected {expected_previous}")
+                value = row["group_displacement_mm"]
+                if value is not None and math.isfinite(value):
+                    values[group].append(float(value))
+            previous = row
+        for group, observations in values.items():
+            stats = describe(observations)
+            count = stats["count"]
+            above = sum(value > threshold for value in observations)
+            output.append({
+                "subject": subject["subject"], "slice_group_index": group,
+                "transition_type": "cross_volume" if group == 0 else "intra_volume",
+                "valid_transition_count": count, "above_threshold_count": above,
+                "exceedance_pct": 100 * above / count if count else None,
+                "mean_displacement_mm": stats["mean"], "p95_displacement_mm": stats["p95"],
+            })
+    return output
+
+
+def plot_slice_group_exceedance(rows: list[dict[str, Any]], subjects: list[str], output: Path, threshold: float) -> None:
+    """One shared-scale 2-by-3 bar figure; group zero marks the boundary."""
+    if len(subjects) > 6:
+        raise AnalysisError("The slice-group position figure supports at most six subjects")
+    plt = pyplot()
+    from matplotlib.patches import Patch
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8), sharex=True, sharey=True, constrained_layout=True)
+    lookup = {(row["subject"], row["slice_group_index"]): row for row in rows}
+    maximum = max((row["exceedance_pct"] for row in rows if row["exceedance_pct"] is not None), default=0)
+    for ax, subject in zip(axes.flat, subjects):
+        rates = [lookup[(subject, group)]["exceedance_pct"] for group in range(14)]
+        ax.bar(range(14), [rate if rate is not None else np.nan for rate in rates],
+               color=["#D55E00"] + ["#0072B2"] * 13)
+        ax.set_title(subject)
+        ax.set_xticks(range(14))
+        ax.tick_params(axis="x", labelbottom=True)
+        ax.set_xlabel("Slice-group index")
+        ax.set_ylabel(f"Valid transitions > {threshold:.2f} mm (%)")
+        ax.set_ylim(0, min(100, max(1, maximum * 1.15)))
+        ax.grid(axis="y", alpha=0.2)
+    for ax in list(axes.flat)[len(subjects):]:
+        ax.set_visible(False)
+    fig.legend(handles=[Patch(color="#D55E00", label="Group 0: cross-volume transition"),
+                        Patch(color="#0072B2", label="Groups 1–13: intra-volume transitions")],
+               loc="outside lower center", ncol=2, frameon=False)
+    fig.suptitle(f"High-motion exceedance by slice-group position · consecutive displacement > {threshold:.2f} mm")
+    fig.savefig(output / POSITION_FIGURE[0], dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
 def make_figures(subjects: list[dict[str, Any]], output: Path, threshold: float) -> None:
     plt = pyplot()
     count = len(subjects)
@@ -545,7 +627,7 @@ def write_reports(subjects: list[dict[str, Any]], output: Path, radius: float, t
     summary = {"schema_version": 2, "generated_at_utc": datetime.now(timezone.utc).isoformat(),
                "methods": methods(radius, threshold), "warnings": global_warnings,
                "cross_subject": aggregate_subjects(clean), "subjects": clean,
-               "figures": [name for name, _ in FIGURES]}
+               "figures": [name for name, _ in FIGURES] + [POSITION_FIGURE[0]]}
     (output / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
     rows = [r for s in subjects for r in s.get("group_rows", [])]
     write_csv(output / "group_motion.csv", rows, GROUP_FIELDS)
@@ -565,6 +647,9 @@ def write_reports(subjects: list[dict[str, Any]], output: Path, radius: float, t
         fields = list(dict.fromkeys(k for row in subject_rows for k in row))
         export = [{k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in row.items()} for row in subject_rows]
         write_csv(output / "subject_summary.csv", export, fields)
+    position_rows = slice_group_exceedance_rows(subjects, threshold)
+    write_csv(output / POSITION_CSV, position_rows, POSITION_FIELDS)
+    plot_slice_group_exceedance(position_rows, [s["subject"] for s in subjects], output, threshold)
     write_html_report(summary, output)
     return summary
 
@@ -601,6 +686,11 @@ def write_html_report(summary: dict[str, Any], output: Path) -> None:
         "<p>Volume 0 is a recorded identity reference. Counts above exclude identity initialization. Every later volume has 14 opportunities. Subject identifiers come from folder suffixes.</p>",
         "<h2>Consecutive slice-group displacement: all expected registration estimates</h2>", motion_table(),
         f"<p>Affected volumes counts the number of unique acquired volumes containing at least one consecutive slice-group displacement exceeding {threshold:.2f} mm. Each volume is counted once, regardless of the number of above-threshold transitions. Cross-volume transitions are included and attributed to the volume containing the current slice group.</p>"]
+    encoded_position = base64.b64encode((output / POSITION_FIGURE[0]).read_bytes()).decode("ascii")
+    sections += ["<h2>High-motion exceedance by slice-group position</h2>",
+                 f"<p>Bars show the percentage of valid consecutive slice-group displacement measurements exceeding {threshold:.2f} mm at each slice-group position. Group 0 represents the cross-volume transition from the preceding volume's final group to the current volume's first group. Groups 1–13 represent intra-volume transitions. Exceedances identify elevated estimated motion between registration measurements, not necessarily image corruption.</p>",
+                 "<p>The first group-0 transition uses the recorded reference identity; no within-reference transitions are inferred. Rates use each group's valid-transition count, excluding missing observations.</p>",
+                 f'<figure><img alt="{html.escape(POSITION_FIGURE[1])}" src="data:image/png;base64,{encoded_position}"><figcaption>{html.escape(POSITION_FIGURE[1])}</figcaption></figure>']
     sections += ["<h2>Reference-relative displacement distributions</h2>", table(
         ["Subject", "Metric (all slice groups)", "N", "Mean", "Median", "P95", "Max"],
         [[s["subject"], metric, *[s.get("group_statistics", {}).get(metric, {}).get(k) for k in ["count", "mean", "median", "p95", "max"]]]
@@ -619,7 +709,7 @@ def write_html_report(summary: dict[str, Any], output: Path) -> None:
     sections.append("<h2>Full subject metadata and provenance</h2>")
     for s in clean:
         sections.append(f"<details><summary>{esc(s['subject'])}</summary><pre>{esc(json.dumps(s, indent=2, allow_nan=False))}</pre></details>")
-    sections.append("<h2>Companion exports</h2><p>summary.json; subject_summary.csv; motion_statistics.csv; group_motion.csv/json. Figures are embedded here and also saved as standalone PNGs.</p>")
+    sections.append("<h2>Companion exports</h2><p>summary.json; subject_summary.csv; motion_statistics.csv; group_motion.csv/json; slice_group_exceedance_by_position.csv. Figures are embedded here and also saved as standalone PNGs.</p>")
     document = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Six-subject NOCO motion comparison</title><style>body{font:15px system-ui,sans-serif;margin:2rem auto;padding:0 1rem;max-width:1450px;color:#172b3a}table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:13px}th,td{border:1px solid #ccd6dd;padding:.5rem;text-align:right}th:first-child,td:first-child{text-align:left}th{background:#eaf0f5}img{max-width:100%}figure{margin:2rem 0}dt{font-weight:bold;margin-top:1rem}dd{margin:.4rem 0 0;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}h2{margin-top:2rem}</style><body>' + "\n".join(sections) + "</body></html>"
     (output / "report.html").write_text(document)
 

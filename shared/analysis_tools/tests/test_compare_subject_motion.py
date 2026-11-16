@@ -345,8 +345,8 @@ def test_exports_figures_html_consistency_and_unavailable_subject(tmp_path):
     assert_no_obsolete_metrics(report)
     assert "Missing metadata" in report and "radius_mm" in report and "t_delta" in report
     images = re.findall(r'src="data:image/png;base64,([^"]+)"', report)
-    assert len(images) == 5
-    for image, (name, _) in zip(images, motion.FIGURES):
+    assert len(images) == 6
+    for image, (name, _) in zip(images, [motion.POSITION_FIGURE, *motion.FIGURES]):
         data = (output / name).read_bytes()
         assert data.startswith(b"\x89PNG")
         assert base64.b64decode(image) == data
@@ -363,7 +363,7 @@ def test_html_affected_volumes_reuses_existing_six_subject_counts(tmp_path):
     summary = {"subjects": subjects, "generated_at_utc": "2026-11-16T12:00:00+00:00",
                "methods": motion.methods(50, .3), "warnings": [], "cross_subject": motion.aggregate_subjects(subjects)}
     (tmp_path / "summary.json").write_text(json.dumps(summary))
-    for name, _ in motion.FIGURES:
+    for name, _ in [*motion.FIGURES, motion.POSITION_FIGURE]:
         (tmp_path / name).write_bytes(b"existing figure bytes")
     before = snapshot(tmp_path)
     motion.write_html_report(summary, tmp_path)
@@ -389,6 +389,81 @@ def test_duplicate_records_and_conflicting_transforms_refused(tmp_path):
     sitk.WriteTransform(euler(translation=(99, 0, 0)), str(directory / source.name))
     with pytest.raises(motion.AnalysisError, match="Conflicting duplicate"):
         motion.load_transform(directory, source.name, [])
+
+
+def test_slice_group_positions_use_metadata_counts_and_valid_denominators():
+    rows = [{"volume": 0, "group": 14, "is_reference": True, "group_displacement_mm": None}]
+    for volume in range(1, 4):
+        for group in range(14):
+            value = .3  # Equality must not count as an exceedance.
+            if group == 0:
+                value = .4
+            elif group == 1:
+                value = None if volume == 2 else (.1 if volume == 1 else .5)
+            elif group == 2:
+                value = None
+            rows.append({"volume": volume, "group": group, "is_reference": False, "group_displacement_mm": value})
+    summary = motion.slice_group_exceedance_rows([{"subject": "GBS001", "group_rows": rows}], .3)
+    assert [r["slice_group_index"] for r in summary] == list(range(14))
+    assert summary[0]["transition_type"] == "cross_volume"
+    assert all(r["transition_type"] == "intra_volume" for r in summary[1:])
+    assert summary[0]["valid_transition_count"] == 3  # Includes identity-to-first-estimate transition.
+    assert summary[0]["above_threshold_count"] == 3
+    assert summary[0]["exceedance_pct"] == 100
+    assert summary[1]["valid_transition_count"] == 2
+    assert summary[1]["above_threshold_count"] == 1
+    assert summary[1]["exceedance_pct"] == 50
+    assert summary[1]["mean_displacement_mm"] == pytest.approx(.3)
+    assert summary[1]["p95_displacement_mm"] == pytest.approx(.48)
+    assert summary[2]["valid_transition_count"] == 0
+    assert summary[2]["exceedance_pct"] is None
+    assert summary[2]["mean_displacement_mm"] is None
+    assert summary[2]["p95_displacement_mm"] is None
+    assert all(r["above_threshold_count"] == 0 for r in summary[3:])
+    assert sum(r["valid_transition_count"] for r in summary) == sum(r["group_displacement_mm"] is not None for r in rows)
+    assert sum(r["above_threshold_count"] for r in summary) == 4
+
+
+def test_slice_group_positions_reject_duplicate_or_nonconsecutive_metadata(tmp_path):
+    subject = motion.analyze_subject("GBS001", make_subject(tmp_path))
+    rows = subject["group_rows"]
+    summary = motion.slice_group_exceedance_rows([subject], .3)
+    assert sum(r["valid_transition_count"] for r in summary) == 42
+    assert all(r["valid_transition_count"] == 3 for r in summary)
+    with pytest.raises(motion.AnalysisError, match="Duplicate"):
+        motion.slice_group_exceedance_rows([{**subject, "group_rows": rows + [rows[-1]]}], .3)
+    with pytest.raises(motion.AnalysisError, match="Nonconsecutive"):
+        motion.slice_group_exceedance_rows([{**subject, "group_rows": [rows[0], rows[2], rows[1], *rows[3:]]}], .3)
+    # A non-reference group 14 must not be assigned using an array-position modulo.
+    with pytest.raises(motion.AnalysisError, match="Invalid slice-group"):
+        motion.slice_group_exceedance_rows([{**subject, "group_rows": [rows[0], {**rows[1], "group": 14}]}], .3)
+
+
+def test_slice_group_position_figure_order_bars_scale_and_boundary_color(tmp_path, monkeypatch):
+    from matplotlib.figure import Figure
+
+    subjects = ["GBS024", "GBS029", "GBS061", "GBS067", "GBS069", "GBS071"]
+    rows = [{"subject": subject, "slice_group_index": group, "exceedance_pct": i + group / 10}
+            for i, subject in enumerate(subjects) for group in range(14)]
+    captured = []
+    monkeypatch.setattr(Figure, "savefig", lambda fig, path, **kwargs: captured.append((fig, path, kwargs)))
+    motion.plot_slice_group_exceedance(rows, subjects, tmp_path, .3)
+    fig, path, options = captured[0]
+    assert path.name == motion.POSITION_FIGURE[0]
+    assert options["dpi"] == 160
+    assert len(fig.axes) == 6
+    assert fig.axes[0].get_subplotspec().get_gridspec().get_geometry() == (2, 3)
+    for i, (ax, subject) in enumerate(zip(fig.axes, subjects)):
+        assert ax.get_title() == subject
+        assert ax.get_ylim() == fig.axes[0].get_ylim()
+        assert len(ax.patches) == 14
+        assert list(ax.get_xticks()) == list(range(14))
+        assert ax.get_xlabel() == "Slice-group index"
+        assert "0.30 mm (%)" in ax.get_ylabel()
+        assert ax.patches[0].get_facecolor() != ax.patches[1].get_facecolor()
+        assert all(bar.get_facecolor() == ax.patches[1].get_facecolor() for bar in ax.patches[1:])
+        assert [bar.get_height() for bar in ax.patches] == pytest.approx([i + group / 10 for group in range(14)])
+    assert "Group 0: cross-volume transition" in fig.legends[0].get_texts()[0].get_text()
 
 
 def test_obsolete_output_cleanup_is_specific_and_repeatable(tmp_path):
@@ -500,6 +575,29 @@ def test_generated_six_subject_artifacts_if_available():
         assert len(list(csv.DictReader(stream))) == len(groups)
     with (output / "subject_summary.csv").open() as stream:
         assert {r["subject"] for r in csv.DictReader(stream)} == expected_subjects
+    with (output / motion.POSITION_CSV).open() as stream:
+        reader = csv.DictReader(stream)
+        assert reader.fieldnames == motion.POSITION_FIELDS
+        positions = list(reader)
+    assert len(positions) == 84
+    expected_exceedances = {"GBS024": 79, "GBS029": 4, "GBS061": 55, "GBS067": 131, "GBS069": 77, "GBS071": 440}
+    recomputed = motion.slice_group_exceedance_rows(
+        [{"subject": s["subject"], "group_rows": [r for r in groups if r["subject"] == s["subject"]]} for s in summary["subjects"]], .3)
+    for exported, calculated in zip(positions, recomputed):
+        assert exported["subject"] == calculated["subject"]
+        assert exported["transition_type"] == calculated["transition_type"]
+        for key in motion.POSITION_FIELDS[3:]:
+            assert float(exported[key]) == pytest.approx(calculated[key])
+    for subject in expected_subjects:
+        rows = [r for r in positions if r["subject"] == subject]
+        assert [int(r["slice_group_index"]) for r in rows] == list(range(14))
+        assert all(int(r["valid_transition_count"]) == 479 for r in rows)
+        assert sum(int(r["valid_transition_count"]) for r in rows) == 6706
+        assert sum(int(r["above_threshold_count"]) for r in rows) == expected_exceedances[subject]
+        assert rows[0]["transition_type"] == "cross_volume"
+        assert all(r["transition_type"] == "intra_volume" for r in rows[1:])
+        for row in rows:
+            assert float(row["exceedance_pct"]) == pytest.approx(100 * int(row["above_threshold_count"]) / 479)
     report = (output / "report.html").read_text()
     headers, rows = displacement_summary_table(report)
     assert headers[-1] == "Affected volumes (>0.3 mm)"
@@ -513,6 +611,7 @@ def test_generated_six_subject_artifacts_if_available():
         assert not (output / name).exists()
     assert all(subject in report for subject in expected_subjects)
     images = re.findall(r'src="data:image/png;base64,([^"]+)"', report)
-    assert len(images) == 5
-    for encoded, (filename, _) in zip(images, motion.FIGURES):
+    assert len(images) == 6
+    assert report.index("Consecutive slice-group displacement: all expected registration estimates</h2>") < report.index("High-motion exceedance by slice-group position</h2>") < report.index("Reference-relative displacement distributions</h2>")
+    for encoded, (filename, _) in zip(images, [motion.POSITION_FIGURE, *motion.FIGURES]):
         assert base64.b64decode(encoded) == (output / filename).read_bytes()

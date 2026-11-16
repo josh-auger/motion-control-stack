@@ -121,9 +121,28 @@ Statistics use finite observations only, population SD, and linearly interpolate
 percentiles. `missing_count` includes the initial undefined displacement.
 Cross-subject distributions of subject means weight subjects equally.
 
+## Exceedance by slice-group position
+
+The **High-motion exceedance by slice-group position** section follows the
+consecutive-displacement summary table. It groups the existing displacement
+measurements by the current estimate's explicit volume and slice-group metadata;
+it does not recompute motion or change registration ordering. Consecutive metadata
+pairs are checked before classification. Group 0 is the cross-volume transition
+from the preceding volume's final estimate to the current volume's first estimate;
+the initial such transition uses the recorded volume-0 identity. Groups 1–13 are
+intra-volume transitions. No within-reference observations are invented.
+
+For each group, exceedance percentage is `100 * count(D > 0.30 mm) / count(valid D)`.
+Missing values do not enter the denominator; a group with no valid measurements
+has a missing rate, mean, and P95. Each complete subject contributes 479 valid
+measurements per group, totaling 6,706. Mean and P95 are calculated over all valid
+measurements in the group, including those below threshold. Exceedances indicate
+elevated estimated motion between registration measurements, not necessarily
+image corruption. This is a descriptive positional comparison.
+
 ## Artifacts
 
-* `report.html`: self-contained HTML with five embedded PNGs, tables, methods,
+* `report.html`: self-contained HTML with six embedded PNGs, tables, methods,
   warnings, and provenance. No external JavaScript, fonts, or image dependencies.
 * `figure_1_motion_trajectories.png`: six aligned subject rows, translation and
   rotation columns, shared acquisition-time and per-unit axes; every group shown.
@@ -135,6 +154,13 @@ Cross-subject distributions of subject means weight subjects equally.
   percentage of valid transitions exceeding the threshold.
 * `figure_4_registration_performance.png`: registered/failed/skipped/missing counts.
 * `figure_5_registration_runtime.png`: full-call distributions, startup retained.
+* `slice_group_exceedance_by_position.png`: one 2×3 figure in GBS024, GBS029,
+  GBS061, GBS067, GBS069, GBS071 order, with 14 bars per subject, group 0 highlighted,
+  and a common percentage scale. The original five figures are unchanged.
+* `slice_group_exceedance_by_position.csv`: supporting `subject`,
+  `slice_group_index`, `transition_type` (`cross_volume` or `intra_volume`),
+  `valid_transition_count`, `above_threshold_count`, `exceedance_pct`,
+  `mean_displacement_mm`, and `p95_displacement_mm` columns.
 * `summary.json` (schema 2): metadata, completeness, group statistics, runtimes,
   cross-subject comparisons, provenance, assumptions, and warnings.
 * `subject_summary.csv`: metadata and processing completeness.
